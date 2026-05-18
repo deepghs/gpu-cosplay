@@ -151,6 +151,36 @@ def _image_has_entrypoint(image: str) -> bool:
     return "YES" in p.stdout
 
 
+def _query_persistence_mode(gpu_index: int) -> Optional[bool]:
+    """Returns True/False if known, None on parse failure."""
+    p = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=persistence_mode",
+            "--format=csv,noheader",
+            "-i",
+            str(gpu_index),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if p.returncode != 0:
+        return None
+    out = p.stdout.strip().lower()
+    if "enabled" in out:
+        return True
+    if "disabled" in out:
+        return False
+    return None
+
+
+def _set_persistence(gpu_index: int, enabled: bool) -> None:
+    _run(
+        _need_sudo() + ["nvidia-smi", "-i", str(gpu_index), "-pm", "1" if enabled else "0"],
+        check=False,
+    )
+
+
 def _phys_vram_mib(plan: Plan) -> int:
     """How many MiB the chosen MIG slice (or full GPU) physically has.
 
@@ -313,13 +343,15 @@ def up(
 
     gpu = plan.host
     original_power = gpu.power_default_w
+    original_persistence = _query_persistence_mode(gpu.index)
     mig_changed = False
     mig_uuid = None
     gi_id = ci_id = None
 
     try:
-        # Persistence mode (needed for clock lock to stick)
-        _run(_need_sudo() + ["nvidia-smi", "-i", str(gpu.index), "-pm", "1"], check=False)
+        # Persistence mode (needed for clock lock to stick). Remember the
+        # prior state so `down` can restore it if we flipped it.
+        _set_persistence(gpu.index, True)
 
         # Power
         if plan.power_limit_w is not None:
@@ -367,6 +399,14 @@ def up(
             name,
             "--hostname",
             f"cosplay-{plan.target.key.replace('_', '-')}",
+            # Authoritative tag for `gpu-cosplay reset` to find our containers
+            # even when the user gave a non-standard --name.
+            "--label",
+            "gpu-cosplay.session=1",
+            "--label",
+            f"gpu-cosplay.target={plan.target.key}",
+            "--label",
+            f"gpu-cosplay.host-gpu={gpu.index}",
         ]
         if port:
             args += ["-p", f"{port}:22"]
@@ -448,6 +488,7 @@ def up(
             workspace_mount=ws_host,
             original_power_limit_w=original_power,
             original_mig_enabled=not mig_changed,  # True if MIG was already on
+            original_persistence_mode=original_persistence,
             image=image,
             ssh_available=has_sshd,
         )
@@ -471,26 +512,186 @@ def up(
 
 
 def down(name: str) -> None:
+    """Tear down a session and restore the host GPU to its pre-up state.
+
+    Every step is best-effort and continues on failure so that the state.json
+    entry is always removed at the end — a stale entry is worse than a
+    half-cleaned device because the latter is observable from `nvidia-smi`.
+    """
     sess = state.get(name)
     if sess is None:
         raise SystemExit(f"no such session: {name}. Use `gpu-cosplay ps`.")
-    # Stop container
+
+    # Stop container (idempotent: succeeds even if already gone).
     subprocess.run(_docker() + ["rm", "-f", sess.container_name], capture_output=True)
-    # Reset clock
+
+    # Reset clock lock if we set one.
     if sess.clock_mhz is not None:
-        _reset_clock(sess.gpu_index)
-    # Destroy MIG
+        try:
+            _reset_clock(sess.gpu_index)
+        except Exception as e:
+            print(
+                f"[cosplay] warning: could not reset clock on GPU {sess.gpu_index}: {e}",
+                file=sys.stderr,
+            )
+
+    # Destroy MIG instances we created.
     if sess.mig_profile_name is not None:
-        _destroy_mig_instances(sess.gpu_index)
+        try:
+            _destroy_mig_instances(sess.gpu_index)
+        except Exception as e:
+            print(
+                f"[cosplay] warning: could not destroy MIG on GPU {sess.gpu_index}: {e}",
+                file=sys.stderr,
+            )
+        # Only flip MIG mode off if we were the one who flipped it on.
         if not sess.original_mig_enabled:
-            _disable_mig(sess.gpu_index)
-    # Restore power
+            try:
+                _disable_mig(sess.gpu_index)
+            except Exception as e:
+                print(
+                    f"[cosplay] warning: could not disable MIG on GPU {sess.gpu_index}: {e}",
+                    file=sys.stderr,
+                )
+
+    # Restore power limit if we changed it.
     if sess.power_limit_w is not None and sess.original_power_limit_w is not None:
         try:
             _set_power(sess.gpu_index, sess.original_power_limit_w)
+        except Exception as e:
+            print(
+                f"[cosplay] warning: could not restore power on GPU {sess.gpu_index}: {e}",
+                file=sys.stderr,
+            )
+
+    # Restore persistence mode if we know what it was and flipped it.
+    if sess.original_persistence_mode is False:
+        try:
+            _set_persistence(sess.gpu_index, False)
         except Exception:
             pass
+
     state.remove(name)
+
+
+def reset(gpu_indices: Optional[list[int]] = None, purge_state: bool = False) -> dict:
+    """Force-reset GPUs back to driver defaults. Safe to run any time; useful
+    when `down` failed or state.json is corrupt.
+
+    For each target GPU:
+      - Reset clock lock
+      - Reset power limit to its default value (queried from the GPU itself)
+      - Destroy any MIG compute and GPU instances
+      - Disable MIG mode if it was enabled
+
+    Also removes any docker containers whose name starts with `cosplay-`. If
+    `purge_state` is True, wipes ~/.cache/gpu-cosplay/state.json.
+
+    Returns a dict report of what was done.
+    """
+    report: dict = {"containers_removed": [], "gpus": []}
+
+    # 1. Remove all our containers. Try three sources so we catch everything:
+    #    (a) docker label "gpu-cosplay.session=1" added at up() — authoritative.
+    #    (b) name prefix "cosplay-" — handles legacy sessions without labels.
+    #    (c) container_name from state.json — handles user-supplied --name.
+    seen: set[str] = set()
+    for filt in ("label=gpu-cosplay.session=1", "name=^cosplay-"):
+        p = subprocess.run(
+            _docker() + ["ps", "-a", "--filter", filt, "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+        )
+        for cname in p.stdout.split():
+            if cname in seen:
+                continue
+            seen.add(cname)
+            rm = subprocess.run(_docker() + ["rm", "-f", cname], capture_output=True, text=True)
+            report["containers_removed"].append(
+                {"name": cname, "rc": rm.returncode, "err": rm.stderr.strip()}
+            )
+    for s in state.all_sessions():
+        if s.container_name in seen:
+            continue
+        seen.add(s.container_name)
+        rm = subprocess.run(
+            _docker() + ["rm", "-f", s.container_name], capture_output=True, text=True
+        )
+        # Only report if the container actually existed; rm of a missing one is silent ok.
+        if rm.returncode == 0 and rm.stdout.strip():
+            report["containers_removed"].append({"name": s.container_name, "rc": 0, "err": ""})
+
+    # 2. Iterate GPUs and reset.
+    try:
+        gpus = list_host_gpus()
+    except Exception as e:
+        gpus = []
+        report["gpu_enum_error"] = str(e)
+
+    if gpu_indices is None:
+        targets = gpus
+    else:
+        targets = [g for g in gpus if g.index in gpu_indices]
+
+    for g in targets:
+        item: dict = {"index": g.index, "name": g.name, "actions": []}
+
+        # Reset clock lock (no-op if no lock was set).
+        rc = subprocess.run(
+            _need_sudo() + ["nvidia-smi", "-i", str(g.index), "--reset-gpu-clocks"],
+            capture_output=True,
+            text=True,
+        )
+        item["actions"].append({"clock_reset": rc.returncode == 0, "err": rc.stderr.strip()})
+
+        # Reset power limit to default (we read it from the GPU itself).
+        if g.power_default_w is not None:
+            rc = subprocess.run(
+                _need_sudo() + ["nvidia-smi", "-i", str(g.index), "-pl", str(g.power_default_w)],
+                capture_output=True,
+                text=True,
+            )
+            item["actions"].append(
+                {
+                    "power_reset_to_w": g.power_default_w,
+                    "rc": rc.returncode,
+                    "err": rc.stderr.strip(),
+                }
+            )
+
+        # Destroy MIG instances (CI before GI, as the API requires).
+        if g.mig_capable:
+            rc1 = subprocess.run(
+                _need_sudo() + ["nvidia-smi", "mig", "-i", str(g.index), "-dci"],
+                capture_output=True,
+                text=True,
+            )
+            rc2 = subprocess.run(
+                _need_sudo() + ["nvidia-smi", "mig", "-i", str(g.index), "-dgi"],
+                capture_output=True,
+                text=True,
+            )
+            item["actions"].append({"mig_destroyed": rc1.returncode == 0 or rc2.returncode == 0})
+
+            # Disable MIG mode if currently enabled.
+            if g.mig_enabled:
+                rc = subprocess.run(
+                    _need_sudo() + ["nvidia-smi", "-i", str(g.index), "-mig", "0"],
+                    capture_output=True,
+                    text=True,
+                )
+                item["actions"].append({"mig_mode_disabled": rc.returncode == 0})
+
+        report["gpus"].append(item)
+
+    # 3. Optionally purge state.json.
+    if purge_state:
+        report["state_purged"] = 0
+        for s in state.all_sessions():
+            state.remove(s.name)
+            report["state_purged"] += 1
+
+    return report
 
 
 def down_all() -> int:

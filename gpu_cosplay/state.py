@@ -31,6 +31,9 @@ class Session:
     original_mig_enabled: bool = False
     image: str = "gpu-cosplay:latest"
     ssh_available: bool = True
+    # Persistence-mode state we observed at `up` time. If None, we didn't touch
+    # it (or couldn't read it). If True/False, the original value to restore.
+    original_persistence_mode: Optional[bool] = None
     extra: dict = field(default_factory=dict)
 
 

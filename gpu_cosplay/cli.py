@@ -241,6 +241,47 @@ def cmd_dexec(args: argparse.Namespace) -> int:
     os.execvp(cmd[0], cmd)
 
 
+def cmd_reset(args: argparse.Namespace) -> int:
+    """Force-reset host GPU(s) back to driver defaults. Fallback for when
+    `down` failed or state.json is out of sync with reality."""
+    gpu_indices = None
+    if args.gpu is not None:
+        gpu_indices = [args.gpu]
+    if not args.yes:
+        target = "ALL host GPUs" if gpu_indices is None else f"GPU {gpu_indices[0]}"
+        msg = (
+            f"This will:\n"
+            f"  - remove every docker container named cosplay-*\n"
+            f"  - destroy all MIG instances on {target}\n"
+            f"  - disable MIG mode on {target} (if enabled)\n"
+            f"  - reset clock lock and power limit on {target}\n"
+        )
+        if args.purge_state:
+            msg += "  - wipe ~/.cache/gpu-cosplay/state.json\n"
+        msg += "\nThis is a force-reset for when `gpu-cosplay down` failed.\n"
+        msg += "Continue? [y/N] "
+        try:
+            confirm = input(msg).strip().lower()
+        except EOFError:
+            confirm = ""
+        if confirm not in ("y", "yes"):
+            print("aborted", file=sys.stderr)
+            return 1
+    report = apply.reset(gpu_indices=gpu_indices, purge_state=args.purge_state)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"removed {len(report['containers_removed'])} container(s)")
+        for g in report.get("gpus", []):
+            print(
+                f"GPU {g['index']} ({g['name']}): "
+                f"{sum(1 for a in g['actions'] if any(v is True for v in a.values()))} actions OK"
+            )
+        if "state_purged" in report:
+            print(f"purged {report['state_purged']} state entries")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Run gpu-cosplay-verify inside a running container."""
     sessions = state.all_sessions()
@@ -379,6 +420,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("ps", help="list running sessions")
     sp.set_defaults(func=cmd_ps)
+
+    sp = sub.add_parser(
+        "reset",
+        help="force-reset host GPU(s) back to driver defaults (fallback when `down` fails)",
+    )
+    sp.add_argument(
+        "--gpu",
+        type=int,
+        default=None,
+        help="only reset this GPU index (default: all)",
+    )
+    sp.add_argument(
+        "--purge-state",
+        action="store_true",
+        help="also wipe ~/.cache/gpu-cosplay/state.json",
+    )
+    sp.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt",
+    )
+    sp.add_argument("--json", action="store_true", help="emit JSON report")
+    sp.set_defaults(func=cmd_reset)
 
     sp = sub.add_parser(
         "verify",
