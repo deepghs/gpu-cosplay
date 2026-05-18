@@ -241,6 +241,37 @@ def cmd_dexec(args: argparse.Namespace) -> int:
     os.execvp(cmd[0], cmd)
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Run gpu-cosplay-verify inside a running container."""
+    sessions = state.all_sessions()
+    if not sessions:
+        print("no running cosplay sessions; start one with `gpu-cosplay up <GPU>`", file=sys.stderr)
+        return 1
+    if args.name:
+        s = next((x for x in sessions if x.name == args.name), None)
+        if s is None:
+            print(f"no such session: {args.name}", file=sys.stderr)
+            return 1
+    elif len(sessions) == 1:
+        s = sessions[0]
+    else:
+        print("multiple sessions; specify name", file=sys.stderr)
+        return 1
+    user = os.environ.get("USER", "ubuntu")
+    extra = ["--json"] if args.json else []
+    cmd = apply._docker() + [
+        "exec",
+        "-i",
+        "-u",
+        user,
+        s.container_name,
+        "gpu-cosplay-verify",
+        *extra,
+    ]
+    p = subprocess.run(cmd)
+    return p.returncode
+
+
 def cmd_ps(args: argparse.Namespace) -> int:
     sessions = state.all_sessions()
     if not sessions:
@@ -348,6 +379,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("ps", help="list running sessions")
     sp.set_defaults(func=cmd_ps)
+
+    sp = sub.add_parser(
+        "verify",
+        help="run the in-container self-check (nvidia-smi shim, torch.cuda, "
+        "VRAM cap, pynvml, feature flags)",
+    )
+    sp.add_argument("name", nargs="?")
+    sp.add_argument("--json", action="store_true", help="emit JSON report")
+    sp.set_defaults(func=cmd_verify)
 
     sp = sub.add_parser(
         "build",

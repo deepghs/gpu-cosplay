@@ -25,8 +25,11 @@ Given a target GPU name like `3090`, `4090`, `2060`, or `a100`, it:
    - A user with the **same UID/GID/name** as the host user.
    - The selected MIG slice as the only visible GPU.
    - Your working dir mounted at `/workspace`.
-   - `gpu_cosplay_inject` module that auto-applies the VRAM cap via
-     `torch.cuda.set_per_process_memory_fraction` when imported.
+   - A Python `.pth` runtime hook that **auto-applies the VRAM cap** the
+     moment `torch` is imported — no `import gpu_cosplay_inject` needed.
+   - A `nvidia-smi` shim that **shadows** `/usr/bin/nvidia-smi` (the real
+     binary stays untouched) and rewrites the output so device name, memory
+     total, and power cap match the target GPU.
 
 When you're done, one command tears it all down: removes the container, destroys
 the MIG instance, restores clocks and power. The host GPU is left exactly as it
@@ -57,7 +60,7 @@ gpu-cosplay up 3090 --workspace ~/my-experiment
 gpu-cosplay ssh
 
 # 6. Inside the container, your code Just Works:
-python -c "import gpu_cosplay_inject; import torch; print(torch.cuda.get_device_name(0))"
+python -c "import torch; print(torch.cuda.get_device_name(0))"   # prints the target GPU name
 
 # 7. Tear it down.
 gpu-cosplay down --all
@@ -258,29 +261,70 @@ When you `gpu-cosplay up <GPU>`, the container is set up so that:
   - `GPU_COSPLAY_VRAM_GB`, `GPU_COSPLAY_FP32_TFLOPS`, `GPU_COSPLAY_BF16_TC_TFLOPS`, `GPU_COSPLAY_BW_GBS`
   - `PIP_BREAK_SYSTEM_PACKAGES=1` (the container is single-purpose, pip-installing is safe)
 
-### Enforcing the VRAM cap in your code
+### The container automatically lies on your behalf
 
-Two options:
+You don't `import` anything special. The image ships a `.pth` file in Python's
+site-packages that loads at every Python startup. The hook waits for `torch` to
+be imported, then transparently:
 
-**Option A: import the helper module at the top of your script.**
+1. Calls `torch.cuda.set_per_process_memory_fraction(...)` so allocations
+   beyond the target VRAM OOM the way they would on the real GPU.
+2. Monkey-patches `torch.cuda.get_device_name`, `mem_get_info`, and
+   `get_device_properties` to report the target GPU's name and memory.
+3. Monkey-patches `pynvml.nvmlDeviceGetName`, `nvmlDeviceGetMemoryInfo`, and
+   `nvmlDeviceGetPowerManagementLimit` so anything reading NVML through Python
+   (nvitop, gpustat, your own tooling) sees the target too.
+4. Disables TF32 paths in cuBLAS/cuDNN when the target lacks Tensor Cores
+   (GTX 16-series, V100).
+
+In parallel, a `nvidia-smi` shim sits at `/usr/local/bin/nvidia-smi` and
+rewrites the output of every invocation (default view, `-L`, `--query-gpu=...`)
+to substitute target name, VRAM, and TDP. The real `/usr/bin/nvidia-smi`
+binary is **never modified**; the shim finds it via `shutil.which` after
+dropping its own directory from PATH.
+
+The result is that user code, observability tools, and the shell all agree on
+which GPU we are pretending to be:
 
 ```python
-import gpu_cosplay_inject  # this single line caps VRAM
 import torch
-# ...
+torch.cuda.get_device_name(0)             # "RTX 3090"
+torch.cuda.mem_get_info(0)                # (free, 24*1024**3)
+torch.cuda.get_device_properties(0).name  # "RTX 3090"
+torch.empty(int(30 * 1024**3 / 4),
+            device="cuda")                # RuntimeError: CUDA OOM
 ```
-
-`gpu_cosplay_inject` is pre-installed in the image and calls
-`torch.cuda.set_per_process_memory_fraction(target_gb / device_total, i)` for
-every visible CUDA device.
-
-**Option B: use the wrapper CLI.**
 
 ```bash
-gpu-cosplay-apply -- python train.py
+$ nvidia-smi --query-gpu=name,memory.total,power.max_limit --format=csv
+name, memory.total [MiB], power.max_limit [W]
+RTX 3090, 24576 MiB, 350.00 W
 ```
 
-Equivalent to option A but for code you can't (or don't want to) modify.
+To verify all of this from outside the container, use `gpu-cosplay verify`:
+
+```bash
+$ gpu-cosplay verify <session-name>
+  PASS  env: GPU_COSPLAY_* variables present
+  PASS  nvidia-smi: shim shadows the real binary
+  PASS  nvidia-smi: --query-gpu=name returns target GPU
+  PASS  nvidia-smi: --query-gpu=memory.total returns target VRAM
+  PASS  nvidia-smi: --query-gpu=power.max_limit returns target TDP
+  PASS  nvidia-smi: -L shows target name and no MIG sub-line
+  PASS  nvidia-smi: real /usr/bin/nvidia-smi still untouched
+  PASS  python: gpu_cosplay_runtime auto-loaded
+  PASS  torch: get_device_name reports target
+  PASS  torch: mem_get_info total equals target VRAM
+  PASS  torch: get_device_properties reports target
+  PASS  torch: allocate (cap - 2 GB) succeeds
+  PASS  torch: allocate beyond cap correctly OOMs
+  PASS  pynvml: nvmlDeviceGetName returns target
+  PASS  pynvml: memory.total returns target VRAM
+  ...
+```
+
+Each check that fails is a real bug — please file an issue with the failing
+line and your container's image.
 
 ## Examples
 

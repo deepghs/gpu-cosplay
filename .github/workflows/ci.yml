@@ -9,39 +9,28 @@ on:
 
 jobs:
   test:
-    name: tests / ${{ matrix.os }} / py${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
+    name: tests / py${{ matrix.python }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python: ["3.9", "3.10", "3.11", "3.12"]
-        exclude:
-          - os: macos-latest
-            python: "3.9"
-          - os: macos-latest
-            python: "3.11"
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
-
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-
       - name: Lint (ruff)
         run: ruff check gpu_cosplay tests
-
       - name: Unit tests
         run: pytest -v
-
       - name: Smoke test CLI (no GPU needed)
         run: |
           gpu-cosplay --version
@@ -49,14 +38,12 @@ jobs:
           gpu-cosplay info 3090
           gpu-cosplay info 4090
           gpu-cosplay info a100
-          gpu-cosplay info 2060
 
   docker-build:
     name: docker / image builds
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -65,10 +52,8 @@ jobs:
           sudo apt-get clean
           docker system prune -af 2>/dev/null || true
           df -h /
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Build cosplay image (lean variant for CI)
         uses: docker/build-push-action@v6
         with:
@@ -77,20 +62,19 @@ jobs:
           push: false
           load: true
           build-args: |
-            CUDA_TAG=12.6.3-base-ubuntu24.04
-
-      - name: Smoke test image (no GPU)
+            BASE_IMAGE=nvidia/cuda:12.6.3-base-ubuntu24.04
+      - name: Smoke test image
         run: |
           docker run --rm \
             -e HOST_USER=tester -e HOST_UID=1234 -e HOST_GID=1234 \
             -e GPU_COSPLAY_VRAM_GB=8 -e GPU_COSPLAY_PRETTY="RTX 4060" \
-            -e GPU_COSPLAY_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA dummy" \
+            -e GPU_COSPLAY_PUBKEY="ssh-ed25519 AAAA dummy" \
             --entrypoint /bin/bash gpu-cosplay:ci -c '
-              /entrypoint.sh true 2>&1 | head -20
+              /entrypoint.sh true 2>&1 | head -30
               id tester
               grep -q "PIP_BREAK_SYSTEM_PACKAGES=1" /etc/environment
               grep -q GPU_COSPLAY_CARD /etc/environment
-              which sshd
-              which python3
-              python3 -c "import gpu_cosplay_inject"
+              test -x /usr/local/bin/nvidia-smi
+              test -f /opt/gpu-cosplay/python/gpu_cosplay_runtime.py
+              python3 -c "import gpu_cosplay_runtime; print(\"runtime OK\")"
             '

@@ -59,4 +59,65 @@ def test_dockerfile_dir_exists_in_repo():
     # In dev install, the docker/ dir should be present alongside the package.
     assert os.path.isfile(os.path.join(df, "Dockerfile"))
     assert os.path.isfile(os.path.join(df, "entrypoint.sh"))
-    assert os.path.isfile(os.path.join(df, "gpu_cosplay_inject.py"))
+    assert os.path.isfile(os.path.join(df, "gpu_cosplay_runtime.py"))
+    assert os.path.isfile(os.path.join(df, "gpu_cosplay_runtime.pth"))
+    assert os.path.isfile(os.path.join(df, "nvidia-smi"))
+
+
+def test_phys_vram_mib_from_mig_profile():
+    from gpu_cosplay.cards import find_card
+    from gpu_cosplay.host import HostGPU, MigProfile
+
+    h = HostGPU(
+        index=0,
+        name="NVIDIA H200",
+        uuid="GPU-x",
+        compute_cap="9.0",
+        memory_total_gb=141.0,
+        power_min_w=200,
+        power_max_w=700,
+        power_default_w=700,
+        clock_min_mhz=345,
+        clock_max_mhz=1980,
+        mig_capable=True,
+        mig_enabled=False,
+        mig_profiles=[
+            MigProfile(
+                profile_id=14,
+                name="2g.35gb",
+                sm_count=32,
+                memory_gb=35,
+                instances_total=3,
+                instances_free=3,
+            ),
+        ],
+    )
+    from gpu_cosplay.plan import plan as plan_fn
+
+    p = plan_fn(h, find_card("3090"))
+    assert apply_mod._phys_vram_mib(p) == int(round(35 * 1024))
+
+
+def test_phys_vram_mib_no_mig_uses_full_gpu():
+    from gpu_cosplay.cards import find_card
+    from gpu_cosplay.host import HostGPU
+
+    h = HostGPU(
+        index=0,
+        name="NVIDIA L40S",
+        uuid="GPU-x",
+        compute_cap="8.9",
+        memory_total_gb=48.0,
+        power_min_w=100,
+        power_max_w=350,
+        power_default_w=350,
+        clock_min_mhz=210,
+        clock_max_mhz=2520,
+        mig_capable=False,
+        mig_enabled=False,
+        mig_profiles=[],
+    )
+    from gpu_cosplay.plan import plan as plan_fn
+
+    p = plan_fn(h, find_card("3090"))
+    assert apply_mod._phys_vram_mib(p) == int(round(48 * 1024))

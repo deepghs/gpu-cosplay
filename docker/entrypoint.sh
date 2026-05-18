@@ -1,10 +1,9 @@
 #!/bin/bash
 # gpu-cosplay container entrypoint.
 #
-# Works in two modes:
-#   - cosplay-baked image: all tools we need are pre-installed.
-#   - bring-your-own image: we get bind-mounted in. Skip any step whose
-#     tool is missing (sshd, ssh-keygen, etc.) and surface a clear warning.
+# Works both for the baked image and for bring-your-own (BYO) images that get
+# bind-mounted with our runtime. Each step is guarded so missing tools surface
+# a clear warning instead of crashing the container.
 set -uo pipefail
 
 HOST_USER="${HOST_USER:-ubuntu}"
@@ -15,7 +14,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 warn() { echo "[gpu-cosplay] WARN: $*" >&2; }
 
 # ---------------------------------------------------------------------------
-# 1. User and group: try to match the host's identity.
+# 1. Match the host's user identity.
 # ---------------------------------------------------------------------------
 if have groupadd; then
     if ! getent group "${HOST_GID}" >/dev/null; then
@@ -40,7 +39,7 @@ fi
 mkdir -p "/home/${HOST_USER}" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 2. Sudo (optional — only if sudo is available).
+# 2. Sudo NOPASSWD for convenience.
 # ---------------------------------------------------------------------------
 if [[ -d /etc/sudoers.d ]] && have sudo; then
     echo "${HOST_USER} ALL=(ALL) NOPASSWD: ALL" >/etc/sudoers.d/90-cosplay 2>/dev/null \
@@ -63,7 +62,7 @@ HAVE_SSHD=0
 if have sshd; then
     HAVE_SSHD=1
     mkdir -p /var/run/sshd 2>/dev/null || true
-    have ssh-keygen && ssh-keygen -A 2>/dev/null || warn "ssh-keygen missing; using existing host keys"
+    have ssh-keygen && ssh-keygen -A 2>/dev/null || warn "ssh-keygen missing"
     if [[ -f /etc/ssh/sshd_config ]]; then
         sed -i 's/#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config 2>/dev/null || true
         sed -i 's/#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config 2>/dev/null || true
@@ -79,7 +78,8 @@ fi
 chown "${HOST_UID}:${HOST_GID}" /workspace 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 5. Env bake: profile.d for login shells, /etc/environment for sshd shells.
+# 5. Bake env vars so they're visible from any shell (login or non-login,
+#    sshd-launched or docker-exec'd).
 # ---------------------------------------------------------------------------
 if [[ -d /etc/profile.d ]]; then
     cat >/etc/profile.d/gpu-cosplay.sh <<EFP
@@ -89,15 +89,15 @@ export GPU_COSPLAY_VRAM_GB="${GPU_COSPLAY_VRAM_GB:-}"
 export GPU_COSPLAY_FP32_TFLOPS="${GPU_COSPLAY_FP32_TFLOPS:-}"
 export GPU_COSPLAY_BF16_TC_TFLOPS="${GPU_COSPLAY_BF16_TC_TFLOPS:-}"
 export GPU_COSPLAY_BW_GBS="${GPU_COSPLAY_BW_GBS:-}"
+export GPU_COSPLAY_TDP_W="${GPU_COSPLAY_TDP_W:-}"
+export GPU_COSPLAY_PHYS_VRAM_MIB="${GPU_COSPLAY_PHYS_VRAM_MIB:-}"
 export PIP_BREAK_SYSTEM_PACKAGES=1
-export PYTHONPATH="/opt/gpu-cosplay/python:\${PYTHONPATH:-}"
 EFP
     chmod 644 /etc/profile.d/gpu-cosplay.sh
 fi
 
 if [[ -f /etc/environment ]] || touch /etc/environment 2>/dev/null; then
-    # Avoid duplicating entries if the entrypoint reruns.
-    sed -i '/^GPU_COSPLAY_/d;/^PIP_BREAK_SYSTEM_PACKAGES=/d;/^PYTHONPATH=/d' /etc/environment 2>/dev/null || true
+    sed -i '/^GPU_COSPLAY_/d;/^PIP_BREAK_SYSTEM_PACKAGES=/d' /etc/environment 2>/dev/null || true
     {
         echo "GPU_COSPLAY_CARD=\"${GPU_COSPLAY_CARD:-}\""
         echo "GPU_COSPLAY_PRETTY=\"${GPU_COSPLAY_PRETTY:-}\""
@@ -105,25 +105,61 @@ if [[ -f /etc/environment ]] || touch /etc/environment 2>/dev/null; then
         echo "GPU_COSPLAY_FP32_TFLOPS=\"${GPU_COSPLAY_FP32_TFLOPS:-}\""
         echo "GPU_COSPLAY_BF16_TC_TFLOPS=\"${GPU_COSPLAY_BF16_TC_TFLOPS:-}\""
         echo "GPU_COSPLAY_BW_GBS=\"${GPU_COSPLAY_BW_GBS:-}\""
+        echo "GPU_COSPLAY_TDP_W=\"${GPU_COSPLAY_TDP_W:-}\""
+        echo "GPU_COSPLAY_PHYS_VRAM_MIB=\"${GPU_COSPLAY_PHYS_VRAM_MIB:-}\""
         echo "PIP_BREAK_SYSTEM_PACKAGES=1"
-        echo "PYTHONPATH=/opt/gpu-cosplay/python"
     } >>/etc/environment
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Welcome banner.
+# 6. Install the Python runtime hook (.pth + module) into site-packages.
+#    This makes monkey-patching automatic — user code does NOT need to
+#    `import gpu_cosplay_inject` (which is gone). Works for whatever python3
+#    is on PATH (system, /opt/conda, venv, etc.).
+# ---------------------------------------------------------------------------
+RUNTIME_SRC=/opt/gpu-cosplay/python/gpu_cosplay_runtime.py
+PTH_SRC=/opt/gpu-cosplay/python/gpu_cosplay_runtime.pth
+if [[ -f "${RUNTIME_SRC}" ]] && have python3; then
+    SITE_DIR="$(python3 -c 'import site,sys; print(site.getsitepackages()[0])' 2>/dev/null)"
+    if [[ -n "${SITE_DIR}" ]] && [[ -d "${SITE_DIR}" || $(mkdir -p "${SITE_DIR}" 2>/dev/null; echo $?) -eq 0 ]]; then
+        ln -sf "${RUNTIME_SRC}" "${SITE_DIR}/gpu_cosplay_runtime.py" 2>/dev/null \
+            || cp "${RUNTIME_SRC}" "${SITE_DIR}/gpu_cosplay_runtime.py" 2>/dev/null
+        ln -sf "${PTH_SRC}"     "${SITE_DIR}/gpu_cosplay_runtime.pth" 2>/dev/null \
+            || cp "${PTH_SRC}"     "${SITE_DIR}/gpu_cosplay_runtime.pth" 2>/dev/null
+    else
+        warn "could not locate python3 site-packages; torch/pynvml monkey-patches won't auto-load."
+        warn "Workaround: set PYTHONPATH=/opt/gpu-cosplay/python and import gpu_cosplay_runtime manually."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Install nvidia-smi shim + verify tool when bind-mounted in (BYO mode).
+#    The shim at /usr/local/bin/nvidia-smi shadows /usr/bin/nvidia-smi because
+#    /usr/local/bin precedes /usr/bin on PATH. We never touch /usr/bin/nvidia-smi.
+# ---------------------------------------------------------------------------
+if [[ -x /opt/gpu-cosplay/nvidia-smi ]] && [[ ! -x /usr/local/bin/nvidia-smi ]]; then
+    ln -sf /opt/gpu-cosplay/nvidia-smi /usr/local/bin/nvidia-smi 2>/dev/null \
+        || cp /opt/gpu-cosplay/nvidia-smi /usr/local/bin/nvidia-smi 2>/dev/null
+fi
+if [[ -x /opt/gpu-cosplay/gpu_cosplay_verify.py ]] && [[ ! -x /usr/local/bin/gpu-cosplay-verify ]]; then
+    ln -sf /opt/gpu-cosplay/gpu_cosplay_verify.py /usr/local/bin/gpu-cosplay-verify 2>/dev/null \
+        || cp /opt/gpu-cosplay/gpu_cosplay_verify.py /usr/local/bin/gpu-cosplay-verify 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Welcome banner.
 # ---------------------------------------------------------------------------
 echo "================================================================"
 echo "  gpu-cosplay container ready"
 echo "  Cosplaying as: ${GPU_COSPLAY_PRETTY:-?}  (${GPU_COSPLAY_CARD:-?})"
 echo "  VRAM cap:      ${GPU_COSPLAY_VRAM_GB:-?} GB"
 echo "  User:          ${HOST_USER}  (uid=${HOST_UID} gid=${HOST_GID})"
-echo "  sshd:          $([[ ${HAVE_SSHD} = 1 ]] && echo present || echo NOT in image - use 'gpu-cosplay exec' instead)"
+echo "  sshd:          $([[ ${HAVE_SSHD} = 1 ]] && echo present || echo NOT in image - use 'gpu-cosplay exec')"
 echo "================================================================"
 
 # ---------------------------------------------------------------------------
-# 7. Run the CMD. If the CMD asks for sshd and sshd is missing, fall back to
-#    sleep so the container stays up and `docker exec` works.
+# 9. Run the CMD. Fall back to `sleep infinity` if sshd was requested but
+#    isn't in the image — that way `docker exec` still works.
 # ---------------------------------------------------------------------------
 if [[ $# -eq 0 ]]; then
     set -- sleep infinity

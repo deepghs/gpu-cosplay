@@ -148,6 +148,18 @@ def _image_has_entrypoint(image: str) -> bool:
     return "YES" in p.stdout
 
 
+def _phys_vram_mib(plan: Plan) -> int:
+    """How many MiB the chosen MIG slice (or full GPU) physically has.
+
+    The nvidia-smi shim uses this to know which number to substitute in the
+    real binary's output. From the host side we know it exactly because we
+    just picked the MIG profile (or are using the whole GPU).
+    """
+    if plan.mig_profile is not None:
+        return int(round(plan.mig_profile.memory_gb * 1024))
+    return int(round(plan.host.memory_total_gb * 1024))
+
+
 def _image_has_sshd(image: str) -> bool:
     """Quick probe: does the image have sshd in PATH?"""
     p = subprocess.run(
@@ -380,6 +392,10 @@ def up(
             f"GPU_COSPLAY_BF16_TC_TFLOPS={plan.target.bf16_tc_tflops or 0}",
             "-e",
             f"GPU_COSPLAY_BW_GBS={plan.target.bandwidth_gbs}",
+            "-e",
+            f"GPU_COSPLAY_TDP_W={plan.target.tdp_w}",
+            "-e",
+            f"GPU_COSPLAY_PHYS_VRAM_MIB={_phys_vram_mib(plan)}",
         ]
         for k, v in (extra_env or {}).items():
             args += ["-e", f"{k}={v}"]
@@ -387,21 +403,20 @@ def up(
             args += ["-v", f"{os.path.abspath(hp)}:{cp}"]
         args += gpu_flag
 
-        # BYO image: bind-mount our entrypoint + inject helper, override entrypoint.
+        # BYO image: bind-mount entrypoint + Python runtime + nvidia-smi shim,
+        # override entrypoint so we get user setup + env baking + symlink install.
         if is_byo:
             df_dir = _dockerfile_dir()
-            host_entry = os.path.join(df_dir, "entrypoint.sh")
-            host_inject = os.path.join(df_dir, "gpu_cosplay_inject.py")
-            args += [
-                "-v",
-                f"{host_entry}:/opt/gpu-cosplay/entrypoint.sh:ro",
-                "-v",
-                f"{host_inject}:/opt/gpu-cosplay/python/gpu_cosplay_inject.py:ro",
-                "-e",
-                "PYTHONPATH=/opt/gpu-cosplay/python",
-                "--entrypoint",
-                "/opt/gpu-cosplay/entrypoint.sh",
-            ]
+            mounts = {
+                "entrypoint.sh": "/opt/gpu-cosplay/entrypoint.sh",
+                "gpu_cosplay_runtime.py": "/opt/gpu-cosplay/python/gpu_cosplay_runtime.py",
+                "gpu_cosplay_runtime.pth": "/opt/gpu-cosplay/python/gpu_cosplay_runtime.pth",
+                "nvidia-smi": "/opt/gpu-cosplay/nvidia-smi",
+                "gpu_cosplay_verify.py": "/opt/gpu-cosplay/gpu_cosplay_verify.py",
+            }
+            for src, dst in mounts.items():
+                args += ["-v", f"{os.path.join(df_dir, src)}:{dst}:ro"]
+            args += ["--entrypoint", "/opt/gpu-cosplay/entrypoint.sh"]
         args += [image]
         # CMD: sshd if available; else sleep infinity for docker-exec workflow.
         if not has_sshd:
