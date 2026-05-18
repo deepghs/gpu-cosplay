@@ -25,7 +25,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps([c.__dict__ for c in cards], indent=2))
         return 0
-    print(f"{'CARD':<22} {'ARCH':<8} {'VRAM':>6} {'FP32':>6} {'BF16TC':>7} {'BW':>6} {'TDP':>5}")
+    print(f"{'GPU':<22} {'ARCH':<8} {'VRAM':>6} {'FP32':>6} {'BF16TC':>7} {'BW':>6} {'TDP':>5}")
     print("-" * 64)
     for c in cards:
         bf = f"{c.bf16_tc_tflops:.0f}" if c.bf16_tc_tflops else "  -"
@@ -89,10 +89,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         else host.pick_default_gpu(gpus)
     )
     if g is None:
-        print(f"GPU index {args.gpu} not found", file=sys.stderr)
+        print(f"host GPU index {args.gpu} not found", file=sys.stderr)
         return 1
     p = planmod.plan(g, c)
-    print(f"Cosplay plan: {c.pretty} on GPU {g.index} ({g.name})")
+    print(f"Cosplay plan: simulate {c.pretty} on host GPU {g.index} ({g.name})")
     print(f"  MIG profile:  {p.mig_profile.name if p.mig_profile else '(no MIG, whole GPU)'}")
     print(f"  Clock lock:   {f'{p.clock_mhz} MHz' if p.clock_mhz else '(unlocked)'}")
     print(f"  Power limit:  {f'{p.power_limit_w} W' if p.power_limit_w else '(default)'}")
@@ -114,7 +114,7 @@ def cmd_up(args: argparse.Namespace) -> int:
         else host.pick_default_gpu(gpus)
     )
     if g is None:
-        print(f"GPU index {args.gpu} not found", file=sys.stderr)
+        print(f"host GPU index {args.gpu} not found", file=sys.stderr)
         return 1
     p = planmod.plan(g, c)
     extra_vols = [tuple(v.split(":", 1)) for v in (args.volume or [])]
@@ -133,19 +133,22 @@ def cmd_up(args: argparse.Namespace) -> int:
         detach=True,
     )
     s = res.session
-    privkey = ssh.private_key_path()
     print()
     print(f"  Cosplay session up: {s.name}")
-    print(f"  Card:       {c.pretty}  on host GPU {g.index} ({g.name})")
+    print(f"  Target:     {c.pretty}  on host GPU {g.index} ({g.name})")
+    print(f"  Image:      {s.image}")
     print(f"  MIG:        {s.mig_profile_name or '(whole GPU)'}")
     print(f"  Clock:      {s.clock_mhz or 'default'} MHz")
     print(f"  VRAM cap:   {s.vram_cap_gb} GB")
     print(f"  Workspace:  {s.workspace_mount} -> /workspace")
-    print(
-        f"  SSH:        ssh -i {privkey} -p {s.ssh_port} {os.environ.get('USER', 'ubuntu')}@localhost"
-    )
-    print()
-    print(f"  Or:         gpu-cosplay ssh {s.name}")
+    if s.ssh_available and s.ssh_port:
+        privkey = ssh.private_key_path()
+        user = os.environ.get("USER", "ubuntu")
+        print(f"  SSH:        ssh -i {privkey} -p {s.ssh_port} {user}@localhost")
+        print(f"  Or:         gpu-cosplay ssh {s.name}")
+    else:
+        print("  SSH:        (image has no sshd; using docker exec)")
+        print(f"  Shell:      gpu-cosplay ssh {s.name}      # -> falls back to docker exec")
     print(f"  Then:       gpu-cosplay down {s.name}")
     return 0
 
@@ -183,8 +186,19 @@ def cmd_ssh(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return 1
-    key = ssh.private_key_path()
     user = os.environ.get("USER", "ubuntu")
+    if not getattr(s, "ssh_available", True) or s.ssh_port == 0:
+        # Fall back to docker exec when sshd is not in the image.
+        # Mirror ssh semantics: when a command is given, run it through a login
+        # shell so shell metachars work and /etc/environment is sourced.
+        flags = "-it" if sys.stdin.isatty() else "-i"
+        cmd = apply._docker() + ["exec", flags, "-u", user, s.container_name]
+        if args.command:
+            cmd += ["bash", "-lc", " ".join(args.command)]
+        else:
+            cmd += ["bash", "-l"]
+        os.execvp(cmd[0], cmd)
+    key = ssh.private_key_path()
     cmd = [
         "ssh",
         "-i",
@@ -232,7 +246,7 @@ def cmd_ps(args: argparse.Namespace) -> int:
     if not sessions:
         print("no cosplay sessions running")
         return 0
-    print(f"{'NAME':<32} {'CARD':<16} {'GPU':<4} {'MIG':<10} {'CLOCK':<7} {'VRAM':<6} {'SSH'}")
+    print(f"{'NAME':<32} {'TARGET':<16} {'HOST':<4} {'MIG':<10} {'CLOCK':<7} {'VRAM':<6} {'SSH'}")
     for s in sessions:
         print(
             f"{s.name:<32} {s.card_key:<16} {s.gpu_index:<4} "
@@ -250,7 +264,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not os.path.isfile(os.path.join(df, "Dockerfile")):
         print(f"Dockerfile not found at {df}", file=sys.stderr)
         return 1
-    apply.build_image(df, tag=args.tag, no_cache=args.no_cache, cuda_tag=args.cuda_tag)
+    apply.build_image(
+        df,
+        tag=args.tag,
+        no_cache=args.no_cache,
+        base_image=args.base,
+        cuda_tag=args.cuda_tag,
+    )
     return 0
 
 
@@ -262,34 +282,53 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"gpu-cosplay {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser("ls", help="list supported cards")
+    sp = sub.add_parser("ls", help="list supported target GPUs")
     sp.add_argument("--arch", help="filter by architecture (turing/ampere/ada/hopper/volta)")
     sp.add_argument("--json", action="store_true", help="emit JSON")
     sp.set_defaults(func=cmd_ls)
 
-    sp = sub.add_parser("info", help="show specs for a card")
-    sp.add_argument("card")
+    sp = sub.add_parser("info", help="show specs for a target GPU")
+    sp.add_argument("card", metavar="GPU", help="target GPU name (e.g. 3090, 4090, a100, 2060)")
     sp.set_defaults(func=cmd_info)
 
     sp = sub.add_parser("doctor", help="check host capabilities")
     sp.set_defaults(func=cmd_doctor)
 
-    sp = sub.add_parser("plan", help="show how a target would be matched on this host")
-    sp.add_argument("card")
-    sp.add_argument("--gpu", type=int, default=None)
+    sp = sub.add_parser("plan", help="show how a target GPU would be matched on this host")
+    sp.add_argument("card", metavar="GPU", help="target GPU name (e.g. 3090, 4090, a100)")
+    sp.add_argument(
+        "--host-gpu",
+        "--gpu",
+        dest="gpu",
+        type=int,
+        default=None,
+        help="host GPU index to plan against (default: auto-pick MIG-capable)",
+    )
     sp.set_defaults(func=cmd_plan)
 
-    sp = sub.add_parser("up", help="start a cosplay container")
-    sp.add_argument("card", help="target card name (e.g. 3090, 4090, a100, 2060)")
+    sp = sub.add_parser("up", help="start a cosplay container that pretends to be the target GPU")
+    sp.add_argument("card", metavar="GPU", help="target GPU name (e.g. 3090, 4090, a100, 2060)")
     sp.add_argument("--name", help="container name (default: auto)")
-    sp.add_argument("--gpu", type=int, default=None, help="host GPU index")
+    sp.add_argument(
+        "--host-gpu",
+        "--gpu",
+        dest="gpu",
+        type=int,
+        default=None,
+        help="host GPU index to slice (default: auto-pick MIG-capable)",
+    )
     sp.add_argument("--ssh-port", type=int, default=None, help="host port to map to container :22")
     sp.add_argument(
         "--volume", "-v", action="append", help="extra HOST:CONTAINER mount; repeatable"
     )
     sp.add_argument("--env", "-e", action="append", help="extra KEY=VALUE env; repeatable")
     sp.add_argument("--workspace", help="host dir to mount at /workspace (default: $PWD)")
-    sp.add_argument("--image", default=apply.IMAGE_TAG)
+    sp.add_argument(
+        "--image",
+        default=apply.IMAGE_TAG,
+        help="docker image. Default is the cosplay-built image. Pass any image to use it directly "
+        "(BYO mode: we bind-mount our entrypoint and inject helper; sshd falls back to docker exec if missing).",
+    )
     sp.set_defaults(func=cmd_up)
 
     sp = sub.add_parser("down", help="stop a cosplay container and revert GPU state")
@@ -319,9 +358,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--no-cache", action="store_true", help="ignore docker build cache")
     sp.add_argument(
+        "--base",
+        default=None,
+        help="any docker image to layer cosplay on top of, e.g. 'my-org/pytorch:v3'. "
+        "Your image keeps its installed wheels and datasets; we just add sshd and "
+        "the cosplay entrypoint. Requires the base to be Ubuntu/Debian-derived.",
+    )
+    sp.add_argument(
         "--cuda-tag",
         default=None,
-        help=f"override the nvidia/cuda base tag (default: {apply.DEFAULT_CUDA_TAG}). "
+        help=f"shortcut for --base nvidia/cuda:<TAG>. Default base: {apply.DEFAULT_BASE_IMAGE}. "
         f"Use e.g. '12.4.1-cudnn-devel-ubuntu22.04' for older drivers, "
         f"or '12.6.3-base-ubuntu24.04' for a leaner image without cuDNN.",
     )

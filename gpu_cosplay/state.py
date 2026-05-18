@@ -24,11 +24,13 @@ class Session:
     mig_ci_id: Optional[int]
     clock_mhz: Optional[int]
     power_limit_w: Optional[int]
-    ssh_port: int
+    ssh_port: int  # 0 means sshd not available; use docker exec
     vram_cap_gb: float
     workspace_mount: str
     original_power_limit_w: Optional[int] = None
     original_mig_enabled: bool = False
+    image: str = "gpu-cosplay:latest"
+    ssh_available: bool = True
     extra: dict = field(default_factory=dict)
 
 

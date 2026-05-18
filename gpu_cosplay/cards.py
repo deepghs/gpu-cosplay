@@ -28,7 +28,7 @@ class Card:
     notes: str = ""
 
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "cards.yaml")
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "gpus.yaml")
 
 
 def _normalize(name: str) -> str:

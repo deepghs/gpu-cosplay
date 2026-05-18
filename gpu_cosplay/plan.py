@@ -1,4 +1,4 @@
-"""Match a target card to (MIG profile, clock lock, power, vram cap) on a host GPU."""
+"""Match a target GPU to (MIG profile, clock lock, power, vram cap) on a host GPU."""
 
 from __future__ import annotations
 

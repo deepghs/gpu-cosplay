@@ -73,39 +73,98 @@ def _image_exists(tag: str) -> bool:
 
 
 DEFAULT_CUDA_TAG = "12.6.3-cudnn-devel-ubuntu24.04"
+DEFAULT_BASE_IMAGE = f"nvidia/cuda:{DEFAULT_CUDA_TAG}"
+
+
+def _dockerfile_dir() -> str:
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.dirname(pkg_dir), "docker")
 
 
 def build_image(
-    dockerfile_dir: str,
+    dockerfile_dir: Optional[str] = None,
     tag: str = IMAGE_TAG,
     no_cache: bool = False,
+    base_image: Optional[str] = None,
     cuda_tag: Optional[str] = None,
 ) -> None:
+    """Build the cosplay image. `base_image` wins over `cuda_tag` (compat)."""
+    dockerfile_dir = dockerfile_dir or _dockerfile_dir()
+    if base_image is None and cuda_tag is not None:
+        base_image = f"nvidia/cuda:{cuda_tag}"
     args = _docker() + ["build", "-t", tag]
     if no_cache:
         args.insert(args.index("build") + 1, "--no-cache")
-    if cuda_tag:
-        args += ["--build-arg", f"CUDA_TAG={cuda_tag}"]
+    if base_image:
+        args += ["--build-arg", f"BASE_IMAGE={base_image}"]
     args += [dockerfile_dir]
     print(
-        f"[cosplay] building image {tag} from {dockerfile_dir} (CUDA_TAG={cuda_tag or DEFAULT_CUDA_TAG})"
+        f"[cosplay] building image {tag} from {dockerfile_dir} "
+        f"(BASE_IMAGE={base_image or DEFAULT_BASE_IMAGE})"
     )
     _run(args)
 
 
-def _ensure_image() -> None:
-    if _image_exists(IMAGE_TAG):
+def _ensure_image(image: str = IMAGE_TAG) -> None:
+    """If `image` is the default tag, build it on miss. Otherwise just check it exists locally."""
+    if _image_exists(image):
         return
-    # Locate docker/ relative to package
-    pkg_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(pkg_dir)
-    df_dir = os.path.join(repo_root, "docker")
-    if not os.path.isfile(os.path.join(df_dir, "Dockerfile")):
+    if image == IMAGE_TAG:
+        df_dir = _dockerfile_dir()
+        if not os.path.isfile(os.path.join(df_dir, "Dockerfile")):
+            raise SystemExit(
+                f"Image {IMAGE_TAG} not built and Dockerfile not found at {df_dir}.\n"
+                f"Run: gpu-cosplay build"
+            )
+        build_image(df_dir)
+        return
+    # User-specified image: try to pull, else fail loud.
+    print(f"[cosplay] image {image} not present locally; attempting docker pull")
+    p = subprocess.run(_docker() + ["pull", image], capture_output=True, text=True)
+    if p.returncode != 0:
         raise SystemExit(
-            f"Image {IMAGE_TAG} not built and Dockerfile not found at {df_dir}.\n"
-            f"Run: gpu-cosplay build"
+            f"Image {image!r} not found locally and `docker pull` failed:\n{p.stderr.strip()}\n"
+            f"Either pull/build it manually, or layer cosplay on top via:\n"
+            f"  gpu-cosplay build --base {image} --tag my-cosplay"
         )
-    build_image(df_dir)
+
+
+def _image_has_entrypoint(image: str) -> bool:
+    """Check if image already has /entrypoint.sh baked in (a cosplay-built image)."""
+    p = subprocess.run(
+        _docker()
+        + [
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            image,
+            "-c",
+            "test -x /entrypoint.sh && echo YES || echo NO",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return "YES" in p.stdout
+
+
+def _image_has_sshd(image: str) -> bool:
+    """Quick probe: does the image have sshd in PATH?"""
+    p = subprocess.run(
+        _docker()
+        + [
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            image,
+            "-c",
+            "command -v sshd >/dev/null 2>&1 && echo YES || echo NO",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return "YES" in p.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -214,12 +273,28 @@ def up(
     image: str = IMAGE_TAG,
     detach: bool = True,
 ) -> UpResult:
-    """Apply the plan and launch a container."""
+    """Apply the plan and launch a container.
+
+    When `image` is the default cosplay tag, behave as before. When it is a
+    user-supplied image without our entrypoint baked in, bind-mount the
+    entrypoint and inject helper at runtime so any Ubuntu/Debian-derived
+    image can be used directly without rebuilding.
+    """
     if name is None:
         name = f"cosplay-{plan.target.key.replace('_', '-')}-{random.randint(1000, 9999)}"
     if _container_exists(name):
         raise SystemExit(f"container {name!r} already exists. Use `gpu-cosplay down {name}` first.")
-    _ensure_image()
+    _ensure_image(image)
+
+    # Decide BYO vs cosplay-baked.
+    is_byo = (image != IMAGE_TAG) and not _image_has_entrypoint(image)
+    has_sshd = True
+    if is_byo:
+        has_sshd = _image_has_sshd(image)
+        print(
+            f"[cosplay] image {image!r} treated as BYO "
+            f"(sshd={'present' if has_sshd else 'missing -> will use docker exec'})"
+        )
 
     gpu = plan.host
     original_power = gpu.power_default_w
@@ -248,8 +323,8 @@ def up(
         if plan.clock_mhz is not None:
             _lock_clock(gpu.index, plan.clock_mhz)
 
-        # SSH port
-        port = ssh_port or _pick_free_port()
+        # SSH port (only if sshd is available)
+        port = (ssh_port or _pick_free_port()) if has_sshd else 0
 
         # GPU passthrough flag
         if mig_uuid:
@@ -277,8 +352,10 @@ def up(
             name,
             "--hostname",
             f"cosplay-{plan.target.key.replace('_', '-')}",
-            "-p",
-            f"{port}:22",
+        ]
+        if port:
+            args += ["-p", f"{port}:22"]
+        args += [
             "-v",
             f"{ws_host}:/workspace",
             "--shm-size",
@@ -309,7 +386,26 @@ def up(
         for hp, cp in extra_volumes or []:
             args += ["-v", f"{os.path.abspath(hp)}:{cp}"]
         args += gpu_flag
+
+        # BYO image: bind-mount our entrypoint + inject helper, override entrypoint.
+        if is_byo:
+            df_dir = _dockerfile_dir()
+            host_entry = os.path.join(df_dir, "entrypoint.sh")
+            host_inject = os.path.join(df_dir, "gpu_cosplay_inject.py")
+            args += [
+                "-v",
+                f"{host_entry}:/opt/gpu-cosplay/entrypoint.sh:ro",
+                "-v",
+                f"{host_inject}:/opt/gpu-cosplay/python/gpu_cosplay_inject.py:ro",
+                "-e",
+                "PYTHONPATH=/opt/gpu-cosplay/python",
+                "--entrypoint",
+                "/opt/gpu-cosplay/entrypoint.sh",
+            ]
         args += [image]
+        # CMD: sshd if available; else sleep infinity for docker-exec workflow.
+        if not has_sshd:
+            args += ["sleep", "infinity"]
 
         print(f"[cosplay] docker run: {' '.join(shlex.quote(a) for a in args)}")
         cp = subprocess.run(args, capture_output=True, text=True)
@@ -334,6 +430,8 @@ def up(
             workspace_mount=ws_host,
             original_power_limit_w=original_power,
             original_mig_enabled=not mig_changed,  # True if MIG was already on
+            image=image,
+            ssh_available=has_sshd,
         )
         state.add(sess)
         return UpResult(session=sess, plan=plan)

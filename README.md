@@ -4,18 +4,18 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 
-> Make your beefy datacenter GPU pretend to be a smaller consumer card.
+> Make your beefy datacenter GPU pretend to be a smaller consumer GPU.
 
 `gpu-cosplay` is a tool to **simulate the resource envelope of one NVIDIA GPU on
 another**. Have an H200 but need to know if your model fits on an RTX 3090? Got
 an A100 cluster and want to develop against a 2060? `gpu-cosplay` carves out a
-slice of your real GPU and pretends to be the card you ask for — matching VRAM
-capacity, FP32 throughput, BF16 Tensor Core throughput, and memory bandwidth as
+slice of your real GPU and pretends to be the target GPU you ask for — matching
+VRAM, FP32 throughput, BF16 Tensor Core throughput, and memory bandwidth as
 closely as the underlying hardware allows.
 
 ## What it does
 
-Given a target card name like `3090`, `4090`, `2060`, or `a100`, it:
+Given a target GPU name like `3090`, `4090`, `2060`, or `a100`, it:
 
 1. Picks a **MIG profile** with appropriate SM count and memory (on Ampere/Hopper data-center hosts).
 2. **Locks the GPU clock** to scale FP32 throughput to the target.
@@ -34,8 +34,9 @@ was found.
 
 ## Why "cosplay"?
 
-Because we are not emulating the card. We are dressing the H200 up in a costume.
-The bones underneath are still Hopper. See [Honest limits](#honest-limits) below.
+Because we are not emulating the target GPU. We are dressing the H200 up in a
+costume. The bones underneath are still Hopper. See [Honest limits](#honest-limits)
+below.
 
 ## Quick start
 
@@ -43,7 +44,7 @@ The bones underneath are still Hopper. See [Honest limits](#honest-limits) below
 # 1. Prerequisites (Linux + NVIDIA driver + Docker + nvidia-container-toolkit + sudo for nvidia-smi).
 gpu-cosplay doctor
 
-# 2. List the cards you can cosplay as.
+# 2. List the target GPUs you can cosplay as.
 gpu-cosplay ls
 
 # 3. Preview what would happen.
@@ -80,7 +81,7 @@ Requirements:
 - **Linux host** (Ubuntu/Debian/RHEL/etc.).
 - **NVIDIA driver** ≥ R515 (for MIG on H100/H200, R535+).
 - **CUDA-capable host GPU**. For full functionality (MIG), an Ampere or Hopper
-  data-center card: A100, A30, H100, H200, GH200. Other cards (consumer, L40,
+  data-center GPU: A100, A30, H100, H200, GH200. Other GPUs (consumer, L40,
   V100) still work via clock-lock + VRAM cap only, without SM slicing.
 - **Docker** with the [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 - **passwordless `sudo`** to invoke `nvidia-smi mig` / `nvidia-smi -pl` etc.
@@ -90,7 +91,7 @@ Run `gpu-cosplay doctor` to verify each requirement.
 
 ## The cosplay container
 
-When you run `gpu-cosplay up <card>`, your code runs inside a Docker image built
+When you run `gpu-cosplay up <GPU>`, your code runs inside a Docker image built
 from [`docker/Dockerfile`](docker/Dockerfile). It is **not** a pre-baked DL
 environment — it is a thin, configurable shell around the official NVIDIA CUDA
 image. You decide what ML stack goes inside.
@@ -149,11 +150,58 @@ your host's local Docker daemon (we don't push to any registry). Rebuild it
 with `gpu-cosplay build --no-cache` after editing the Dockerfile; multiple
 versions can coexist via `--tag` and selected per-`up` with `--image`.
 
-## Supported cards
+## Bring your own image
+
+You probably already have a PyTorch/training image with all your wheels and
+datasets pre-baked. `gpu-cosplay` gives you **three ways** to use it:
+
+### Option 1: layer cosplay on top of your image (recommended)
+
+```bash
+gpu-cosplay build --base my-org/pytorch:v3 --tag my-cosplay-pt
+gpu-cosplay up 3090 --image my-cosplay-pt
+```
+
+Your image keeps everything it had; we just add sshd, sudo, and the cosplay
+entrypoint on top — usually ~200 MB of layers. Requires the base to be
+Ubuntu/Debian-derived (we use apt).
+
+### Option 2: use your image directly, no rebuild
+
+```bash
+gpu-cosplay up 3090 --image my-org/pytorch:v3
+```
+
+When `--image` is anything other than `gpu-cosplay:latest`, we run in
+**BYO mode**:
+- The entrypoint and inject helper are bind-mounted into the container at
+  `/opt/gpu-cosplay/`.
+- User creation, env baking, and workspace ownership still work.
+- If your image has `sshd`, full SSH access is wired up.
+- If your image doesn't have sshd (most DL images don't), `gpu-cosplay ssh`
+  transparently falls back to `docker exec`. Everything else is unchanged.
+
+This is the lowest-friction path when your image already has the runtime you
+want. You don't need to rebuild anything.
+
+### Option 3: a custom base CUDA tag
+
+If you just want a different CUDA version under the default cosplay layers:
+
+```bash
+gpu-cosplay build --cuda-tag 12.4.1-cudnn-devel-ubuntu22.04
+gpu-cosplay build --cuda-tag 12.6.3-base-ubuntu24.04   # lean, no cuDNN
+gpu-cosplay build --cuda-tag 11.8.0-cudnn8-devel-ubuntu22.04
+```
+
+This is a shortcut for `--base nvidia/cuda:<TAG>`. Any tag from
+[hub.docker.com/r/nvidia/cuda](https://hub.docker.com/r/nvidia/cuda/tags) works.
+
+## Supported GPUs
 
 `gpu-cosplay ls` shows the full catalog. Highlights:
 
-| Family       | Cards                                                              |
+| Family       | GPUs                                                              |
 |--------------|--------------------------------------------------------------------|
 | GTX 16-series | 1650, 1660, 1660 Ti, 1660 Super                                   |
 | RTX 20-series | 2060 (6G/12G), 2070, 2070 Super, 2080, 2080 Super, 2080 Ti        |
@@ -162,11 +210,11 @@ versions can coexist via `--tag` and selected per-`up` with `--image`.
 | Datacenter   | A10, A30, A40, A100 (40G/80G), L4, L40, L40S, V100 (16G/32G), T4, H100 (PCIe/SXM/NVL), H200 |
 
 Aliases are forgiving: `3090`, `rtx3090`, `RTX_3090`, `rtx-3090`, `RTX 3090` all
-resolve to the same card.
+resolve to the same GPU.
 
 ## How it picks a configuration
 
-Given a host GPU (e.g. H200) and a target card (e.g. RTX 3090):
+Given a host GPU (e.g. H200) and a target GPU (e.g. RTX 3090):
 
 1. **MIG profile selection**: choose the smallest profile whose memory ≥ target
    VRAM. For RTX 3090 (24 GB) on H200, that's `2g.35gb` (35 GB).
@@ -177,7 +225,7 @@ Given a host GPU (e.g. H200) and a target card (e.g. RTX 3090):
 4. **VRAM cap**: enforced in-container via PyTorch's
    `set_per_process_memory_fraction` so allocations beyond target VRAM OOM.
 
-Run `gpu-cosplay plan <card>` to see exactly what it would do — including
+Run `gpu-cosplay plan <GPU>` to see exactly what it would do — including
 warnings about any failure to match.
 
 Example:
@@ -195,7 +243,7 @@ Cosplay plan: A100 (40GB) on GPU 0 (NVIDIA H200)
 
 ## Container interface
 
-When you `gpu-cosplay up <card>`, the container is set up so that:
+When you `gpu-cosplay up <GPU>`, the container is set up so that:
 
 - **User identity**: an in-container user with the same `$USER`, `uid`, and
   `gid` as the host runs sshd and owns `/workspace`. Files you create in
@@ -246,7 +294,7 @@ gpu-cosplay down
 
 ### Run multiple cosplays in parallel
 
-H200 with 7× 1g.18gb slices: simulate up to 7 RTX 2060s on one card.
+H200 with 7× 1g.18gb slices: simulate up to 7 RTX 2060s on one physical GPU.
 
 ```bash
 for i in 1 2 3 4; do
@@ -278,7 +326,7 @@ silicon shows through in several ways:
 1. **Architectural features cannot be removed.** If the host is Hopper, FP8
    Tensor Core, TMA, async copy, and the Hopper L2 are all *present*. The
    tool can throttle the host's throughput, but it cannot make the GPU lack a
-   feature. To match a card without BF16 TC (GTX 16-series, V100), you must
+   feature. To match a GPU without BF16 TC (GTX 16-series, V100), you must
    disable mixed-precision in your framework.
 2. **BF16 Tensor Cores are stronger per-SM on the host.** A Hopper SM does
    ~6 BF16 TFLOPS·GHz⁻¹ vs ~1 on Ampere and ~2 on Ada. Matching SM count and
@@ -290,7 +338,7 @@ silicon shows through in several ways:
 4. **`set_per_process_memory_fraction` is PyTorch-only.** Bare `cudaMalloc`
    from custom CUDA code or other frameworks bypasses it. For most
    PyTorch / HF Transformers / vLLM / Diffusers workloads it's sufficient.
-5. **MIG slices have no P2P.** Multi-card NCCL training on MIG instances
+5. **MIG slices have no P2P.** Multi-GPU NCCL training on MIG instances
    doesn't work; for that, use whole GPUs without `--mig`.
 6. **CUDA 11+ limits one MIG per process.** That means parallel multi-GPU
    training within a single Python process needs whole GPUs.
@@ -301,27 +349,29 @@ wall-clock numbers as "RTX 3090 performance" in a paper without a disclaimer.
 ## CLI reference
 
 ```
-gpu-cosplay ls [--arch ARCH] [--json]    list supported cards
-gpu-cosplay info CARD                    show card specs and aliases
-gpu-cosplay doctor                       check host environment
-gpu-cosplay plan CARD [--gpu N]          show what would be applied
-gpu-cosplay up CARD [opts...]            bring up a cosplay container
-gpu-cosplay ssh [NAME] [CMD...]          ssh into a session
-gpu-cosplay exec [NAME] -- CMD...        docker exec into a session
-gpu-cosplay ps                           list running sessions
-gpu-cosplay down NAME | --all            tear down and revert GPU state
-gpu-cosplay build [--tag T] [--no-cache] [--cuda-tag TAG]
-                                         (re)build the docker image
+gpu-cosplay ls [--arch ARCH] [--json]            list supported target GPUs
+gpu-cosplay info GPU                             show specs for a target GPU
+gpu-cosplay doctor                               check host environment
+gpu-cosplay plan GPU [--host-gpu N]              show what would be applied
+gpu-cosplay up GPU [opts...]                     bring up a cosplay container
+gpu-cosplay ssh [NAME] [CMD...]                  shell into a session (sshd or docker exec)
+gpu-cosplay exec [NAME] -- CMD...                docker exec into a session
+gpu-cosplay ps                                   list running sessions
+gpu-cosplay down NAME | --all                    tear down and revert GPU state
+gpu-cosplay build [--tag T] [--no-cache]         (re)build the docker image
+                  [--base IMAGE | --cuda-tag T]
 ```
 
 `up` options:
 - `--name NAME` — container/session name (default: auto)
-- `--gpu N` — host GPU index (default: pick a MIG-capable one)
+- `--host-gpu N` — host GPU index (default: pick a MIG-capable one). `--gpu N` accepted as alias.
 - `--ssh-port PORT` — host port mapped to `:22` (default: random free)
 - `--volume HOST:CONTAINER` — extra volume mount (repeatable)
 - `--env KEY=VALUE` — extra container env (repeatable)
 - `--workspace DIR` — host dir mounted at `/workspace` (default: `$PWD`)
-- `--image IMAGE` — custom docker image tag
+- `--image IMAGE` — custom docker image. Any image works; when it's not our
+  default cosplay image, we bind-mount the entrypoint and inject helper in,
+  and fall back to `docker exec` if it has no sshd.
 
 ## Development
 
@@ -343,6 +393,6 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-Built by [DeepGHS](https://github.com/deepghs). The card spec database draws
+Built by [DeepGHS](https://github.com/deepghs). The GPU spec database draws
 on NVIDIA's official architecture whitepapers (Turing, Ampere, Ada Lovelace,
 Hopper) and the [Epoch AI ML hardware database](https://epoch.ai/data/ml_hardware.csv).

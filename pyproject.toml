@@ -33,6 +33,7 @@ packages = ["gpu_cosplay"]
 
 [tool.setuptools.package-data]
 gpu_cosplay = ["data/*.yaml"]
+# (file is gpus.yaml; pattern keeps cards.yaml working too if ever reintroduced)
 
 [tool.pytest.ini_options]
 minversion = "7.0"
