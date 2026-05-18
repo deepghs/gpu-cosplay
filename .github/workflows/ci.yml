@@ -17,7 +17,6 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.9", "3.10", "3.11", "3.12"]
         exclude:
-          # macos runners are limited; keep matrix narrow there
           - os: macos-latest
             python: "3.9"
           - os: macos-latest
@@ -58,20 +57,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/lib/jvm \
+                      /usr/local/share/boost /usr/share/swift
+          sudo apt-get clean
+          docker system prune -af 2>/dev/null || true
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build cosplay image
+      - name: Build cosplay image (lean variant for CI)
         uses: docker/build-push-action@v6
         with:
           context: ./docker
           tags: gpu-cosplay:ci
           push: false
           load: true
-          # Use a CUDA tag that doesn't require GPU to pull and run a basic check.
-          # We don't run torch here; just verify the image builds and sshd is present.
+          build-args: |
+            CUDA_TAG=12.6.3-base-ubuntu24.04
 
-      - name: Smoke test image (non-GPU)
+      - name: Smoke test image (no GPU)
         run: |
-          docker run --rm --entrypoint /bin/bash gpu-cosplay:ci -lc \
-            'which sshd && which python3 && /entrypoint.sh true || true'
+          docker run --rm \
+            -e HOST_USER=tester -e HOST_UID=1234 -e HOST_GID=1234 \
+            -e GPU_COSPLAY_VRAM_GB=8 -e GPU_COSPLAY_PRETTY="RTX 4060" \
+            -e GPU_COSPLAY_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA dummy" \
+            --entrypoint /bin/bash gpu-cosplay:ci -c '
+              /entrypoint.sh true 2>&1 | head -20
+              id tester
+              grep -q "PIP_BREAK_SYSTEM_PACKAGES=1" /etc/environment
+              grep -q GPU_COSPLAY_CARD /etc/environment
+              which sshd
+              which python3
+              python3 -c "import gpu_cosplay_inject"
+            '
