@@ -250,7 +250,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not os.path.isfile(os.path.join(df, "Dockerfile")):
         print(f"Dockerfile not found at {df}", file=sys.stderr)
         return 1
-    apply.build_image(df, tag=args.tag, no_cache=args.no_cache)
+    apply.build_image(df, tag=args.tag, no_cache=args.no_cache, cuda_tag=args.cuda_tag)
     return 0
 
 
@@ -310,9 +310,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("ps", help="list running sessions")
     sp.set_defaults(func=cmd_ps)
 
-    sp = sub.add_parser("build", help="build the cosplay docker image")
-    sp.add_argument("--tag", default=apply.IMAGE_TAG)
-    sp.add_argument("--no-cache", action="store_true")
+    sp = sub.add_parser(
+        "build",
+        help="build the cosplay docker image (one-time; `up` calls this automatically on first use)",
+    )
+    sp.add_argument(
+        "--tag", default=apply.IMAGE_TAG, help="image tag to write (default: gpu-cosplay:latest)"
+    )
+    sp.add_argument("--no-cache", action="store_true", help="ignore docker build cache")
+    sp.add_argument(
+        "--cuda-tag",
+        default=None,
+        help=f"override the nvidia/cuda base tag (default: {apply.DEFAULT_CUDA_TAG}). "
+        f"Use e.g. '12.4.1-cudnn-devel-ubuntu22.04' for older drivers, "
+        f"or '12.6.3-base-ubuntu24.04' for a leaner image without cuDNN.",
+    )
     sp.set_defaults(func=cmd_build)
 
     return p

@@ -72,11 +72,24 @@ def _image_exists(tag: str) -> bool:
     return bool(p.stdout.strip())
 
 
-def build_image(dockerfile_dir: str, tag: str = IMAGE_TAG, no_cache: bool = False) -> None:
-    args = _docker() + ["build", "-t", tag, dockerfile_dir]
+DEFAULT_CUDA_TAG = "12.6.3-cudnn-devel-ubuntu24.04"
+
+
+def build_image(
+    dockerfile_dir: str,
+    tag: str = IMAGE_TAG,
+    no_cache: bool = False,
+    cuda_tag: Optional[str] = None,
+) -> None:
+    args = _docker() + ["build", "-t", tag]
     if no_cache:
         args.insert(args.index("build") + 1, "--no-cache")
-    print(f"[cosplay] building image {tag} from {dockerfile_dir}")
+    if cuda_tag:
+        args += ["--build-arg", f"CUDA_TAG={cuda_tag}"]
+    args += [dockerfile_dir]
+    print(
+        f"[cosplay] building image {tag} from {dockerfile_dir} (CUDA_TAG={cuda_tag or DEFAULT_CUDA_TAG})"
+    )
     _run(args)
 
 

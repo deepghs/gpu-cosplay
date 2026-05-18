@@ -68,8 +68,13 @@ gpu-cosplay down --all
 git clone https://github.com/deepghs/gpu-cosplay
 cd gpu-cosplay
 pip install -e .
-gpu-cosplay build       # builds the docker image (one-time, ~5 GB)
+gpu-cosplay build       # build the docker image (one-time, ~5 GB on disk)
 ```
+
+The `build` step is optional — the first `gpu-cosplay up` will auto-build the
+image if it's missing. You only need to call `build` explicitly when you want
+to **rebuild from scratch**, **use a different CUDA base**, or **prepare a
+machine for offline use** in advance.
 
 Requirements:
 - **Linux host** (Ubuntu/Debian/RHEL/etc.).
@@ -79,9 +84,70 @@ Requirements:
   V100) still work via clock-lock + VRAM cap only, without SM slicing.
 - **Docker** with the [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 - **passwordless `sudo`** to invoke `nvidia-smi mig` / `nvidia-smi -pl` etc.
-- **Python ≥ 3.9**.
+- **Python ≥ 3.9** on the host.
 
 Run `gpu-cosplay doctor` to verify each requirement.
+
+## The cosplay container
+
+When you run `gpu-cosplay up <card>`, your code runs inside a Docker image built
+from [`docker/Dockerfile`](docker/Dockerfile). It is **not** a pre-baked DL
+environment — it is a thin, configurable shell around the official NVIDIA CUDA
+image. You decide what ML stack goes inside.
+
+**Base image.** `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (Ubuntu 24.04,
+CUDA 12.6.3 + cuDNN + headers, ~5 GB compressed). Chosen because:
+- It runs against NVIDIA driver ≥ R520 (covers any host that supports H100/H200
+  MIG, plus all current A100/A30/L40 systems).
+- `cudnn-devel` ships headers + libraries so `pip install torch` finds cuDNN
+  symbols and JIT-compiled kernels link cleanly.
+
+Override with `--cuda-tag` if you need something else:
+
+```bash
+# Older driver: use CUDA 12.4 + Ubuntu 22.04
+gpu-cosplay build --cuda-tag 12.4.1-cudnn-devel-ubuntu22.04
+
+# Lean image without cuDNN (~3 GB smaller)
+gpu-cosplay build --cuda-tag 12.6.3-base-ubuntu24.04
+
+# CUDA 11.8 (for older PyTorch wheels)
+gpu-cosplay build --cuda-tag 11.8.0-cudnn8-devel-ubuntu22.04
+```
+
+Any tag from [hub.docker.com/r/nvidia/cuda](https://hub.docker.com/r/nvidia/cuda/tags) works.
+
+**What's pre-installed.** Apart from CUDA/cuDNN from the base, just utilities:
+`openssh-server`, `sudo`, `tini`, `python3` + `pip` + `venv`, `build-essential`,
+`pkg-config`, `git`, `curl`/`wget`, `vim`, `tmux`, `htop`, `less`. No PyTorch,
+no transformers, no diffusers — install what you need via `pip` inside.
+
+**What runs at start.** The entrypoint (`docker/entrypoint.sh`) is the
+interesting part — for each container:
+
+1. Creates a user with the host's `$USER` / `$UID` / `$GID` so file ownership
+   on the bind-mounted workspace stays consistent on both sides.
+2. Installs the host's SSH public key into that user's `authorized_keys`.
+3. Bakes the cosplay env vars into `/etc/environment` and a
+   `/etc/profile.d/gpu-cosplay.sh` so they're visible to both login and
+   non-login shells (including `ssh user@host CMD`).
+4. Sets `PIP_BREAK_SYSTEM_PACKAGES=1` so `pip install` works against the
+   system Python (this is a disposable, single-purpose container — PEP 668
+   protections aren't useful here).
+5. Generates sshd host keys if missing and launches sshd in foreground.
+
+Once `up` returns, you can:
+
+```bash
+gpu-cosplay ssh                    # interactive shell as your user
+gpu-cosplay ssh -- python train.py # one-off command
+gpu-cosplay exec NAME -- bash      # docker exec, bypassing sshd
+```
+
+**Image lifecycle.** The image is named `gpu-cosplay:latest` and lives only on
+your host's local Docker daemon (we don't push to any registry). Rebuild it
+with `gpu-cosplay build --no-cache` after editing the Dockerfile; multiple
+versions can coexist via `--tag` and selected per-`up` with `--image`.
 
 ## Supported cards
 
@@ -244,7 +310,8 @@ gpu-cosplay ssh [NAME] [CMD...]          ssh into a session
 gpu-cosplay exec [NAME] -- CMD...        docker exec into a session
 gpu-cosplay ps                           list running sessions
 gpu-cosplay down NAME | --all            tear down and revert GPU state
-gpu-cosplay build [--tag T] [--no-cache] (re)build the docker image
+gpu-cosplay build [--tag T] [--no-cache] [--cuda-tag TAG]
+                                         (re)build the docker image
 ```
 
 `up` options:
