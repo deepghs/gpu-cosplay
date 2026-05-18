@@ -241,6 +241,63 @@ def cmd_dexec(args: argparse.Namespace) -> int:
     os.execvp(cmd[0], cmd)
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """Holistic view: per-host-GPU current state + every cosplay container +
+    orphan detection (containers without state, state without containers)."""
+    gpu_view = apply.host_gpu_status()
+    containers = apply.list_cosplay_containers()
+
+    if args.json:
+        print(json.dumps({"host_gpus": gpu_view, "containers": containers}, indent=2))
+        return 0
+
+    # ---- Host GPU section ----
+    print("Host GPUs:")
+    if not gpu_view:
+        print("  (none detected)")
+    for g in gpu_view:
+        live = g["live"]
+        mig = "ON " if g["mig_enabled"] else ("off" if g["mig_capable"] else "n/a")
+        clock_cur = live.get("clock_current_mhz", "?")
+        clock_app = live.get("clock_applied_mhz", "?")
+        # If applied < max, clocks are locked.
+        clock_state = "locked" if clock_app != "?" and float(clock_app or 0) < 1800 else ""
+        pwr = f"{live.get('power_draw_w', '?')}/{live.get('power_limit_w', '?')} W"
+        print(
+            f"  [{g['index']}] {g['name']:<22} persistence={live.get('persistence', '?'):<8} "
+            f"mig={mig:<3} clock={clock_cur:>4} MHz {clock_state:<6} power={pwr}"
+        )
+        for s in g["sessions"]:
+            cap = f"cap {s['vram_cap_gb']:.0f}GB" if s["vram_cap_gb"] else ""
+            clk = f"@ {s['clock_mhz']} MHz" if s["clock_mhz"] else ""
+            print(
+                f"       └─ {s['name']:<32} target={s['target']:<14} "
+                f"MIG {s['mig_profile'] or '(whole GPU)'}  {clk}  {cap}"
+            )
+
+    # ---- Container section ----
+    print()
+    print(f"Cosplay containers ({len(containers)}):")
+    if not containers:
+        print("  (none)")
+    for c in containers:
+        flag = ""
+        if not c["has_state"]:
+            flag = "  ⚠ NO STATE (orphan)"
+        elif "MISSING" in c["status"]:
+            flag = "  ⚠ STATE WITHOUT CONTAINER"
+        gpu = f"gpu={c['host_gpu']}" if c["host_gpu"] is not None else "gpu=?"
+        target = c["target"] or "?"
+        print(f"  {c['name']:<32} {target:<14} {gpu:<6} {c['status']:<22} image={c['image']}{flag}")
+
+    # ---- Hint if there are orphans ----
+    orphans = [c for c in containers if not c["has_state"] or "MISSING" in c["status"]]
+    if orphans:
+        print()
+        print(f"  {len(orphans)} orphan(s). Run `gpu-cosplay reset --purge-state` to clean up.")
+    return 0
+
+
 def cmd_reset(args: argparse.Namespace) -> int:
     """Force-reset host GPU(s) back to driver defaults. Fallback for when
     `down` failed or state.json is out of sync with reality."""
@@ -418,8 +475,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("command", nargs=argparse.REMAINDER, help="-- cmd args ...")
     sp.set_defaults(func=cmd_dexec)
 
-    sp = sub.add_parser("ps", help="list running sessions")
+    sp = sub.add_parser("ps", help="list running sessions (from state.json)")
     sp.set_defaults(func=cmd_ps)
+
+    sp = sub.add_parser(
+        "status",
+        help="holistic view: per-host-GPU live state + all cosplay containers + orphans",
+    )
+    sp.add_argument("--json", action="store_true", help="emit JSON")
+    sp.set_defaults(func=cmd_status)
 
     sp = sub.add_parser(
         "reset",

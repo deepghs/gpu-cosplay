@@ -694,6 +694,171 @@ def reset(gpu_indices: Optional[list[int]] = None, purge_state: bool = False) ->
     return report
 
 
+def list_cosplay_containers() -> list[dict]:
+    """Return all containers we ever launched (by label, by name, or via state.json).
+
+    Each dict has: name, id, status, target, host_gpu, image, has_state.
+    """
+    seen: dict[str, dict] = {}
+    # By label — authoritative for sessions started since labels were added.
+    p = subprocess.run(
+        _docker()
+        + [
+            "ps",
+            "-a",
+            "--filter",
+            "label=gpu-cosplay.session=1",
+            "--format",
+            "{{.Names}}\t{{.ID}}\t{{.Status}}\t{{.Image}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        name, cid, status, image = parts[:4]
+        seen[name] = {
+            "name": name,
+            "id": cid[:12],
+            "status": status,
+            "image": image,
+            "target": None,
+            "host_gpu": None,
+            "has_state": False,
+        }
+    # Fill in labels (target / host_gpu) per container.
+    for name, info in seen.items():
+        p = subprocess.run(
+            _docker() + ["inspect", "--format", "{{json .Config.Labels}}", name],
+            capture_output=True,
+            text=True,
+        )
+        try:
+            import json as _json
+
+            labels = _json.loads(p.stdout.strip()) or {}
+            info["target"] = labels.get("gpu-cosplay.target")
+            host_gpu = labels.get("gpu-cosplay.host-gpu")
+            info["host_gpu"] = int(host_gpu) if host_gpu and host_gpu.isdigit() else None
+        except Exception:
+            pass
+    # By name prefix (older sessions, no labels). Add only the ones we haven't seen.
+    p = subprocess.run(
+        _docker()
+        + [
+            "ps",
+            "-a",
+            "--filter",
+            "name=^cosplay-",
+            "--format",
+            "{{.Names}}\t{{.ID}}\t{{.Status}}\t{{.Image}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        name = parts[0]
+        if name in seen:
+            continue
+        seen[name] = {
+            "name": name,
+            "id": parts[1][:12],
+            "status": parts[2],
+            "image": parts[3],
+            "target": None,
+            "host_gpu": None,
+            "has_state": False,
+        }
+    # Cross-reference state.json.
+    for s in state.all_sessions():
+        if s.container_name in seen:
+            seen[s.container_name]["has_state"] = True
+            seen[s.container_name].setdefault("target", s.card_key)
+            seen[s.container_name].setdefault("host_gpu", s.gpu_index)
+        else:
+            seen[s.container_name] = {
+                "name": s.container_name,
+                "id": (s.container_id or "")[:12],
+                "status": "MISSING (no docker container)",
+                "image": s.image,
+                "target": s.card_key,
+                "host_gpu": s.gpu_index,
+                "has_state": True,
+            }
+    return sorted(seen.values(), key=lambda d: d["name"])
+
+
+def host_gpu_status() -> list[dict]:
+    """Per-host-GPU live snapshot for `gpu-cosplay status`."""
+    gpus = list_host_gpus()
+    out: list[dict] = []
+    if not gpus:
+        return out
+    # Single nvidia-smi call for all GPUs.
+    p = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,persistence_mode,clocks.current.graphics,"
+            "clocks.applications.graphics,power.draw,power.limit",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    live: dict[int, dict] = {}
+    for line in p.stdout.strip().splitlines():
+        cells = [c.strip() for c in line.split(",")]
+        if len(cells) < 6:
+            continue
+        try:
+            idx = int(cells[0])
+        except ValueError:
+            continue
+        live[idx] = {
+            "persistence": cells[1],
+            "clock_current_mhz": cells[2],
+            "clock_applied_mhz": cells[3],
+            "power_draw_w": cells[4],
+            "power_limit_w": cells[5],
+        }
+    # Cross-reference state.json to know which session occupies which GPU.
+    sessions_by_gpu: dict[int, list] = {}
+    for s in state.all_sessions():
+        sessions_by_gpu.setdefault(s.gpu_index, []).append(s)
+    for g in gpus:
+        out.append(
+            {
+                "index": g.index,
+                "name": g.name,
+                "memory_total_gb": g.memory_total_gb,
+                "mig_capable": g.mig_capable,
+                "mig_enabled": g.mig_enabled,
+                "power_default_w": g.power_default_w,
+                "live": live.get(g.index, {}),
+                "sessions": [
+                    {
+                        "name": s.name,
+                        "target": s.card_key,
+                        "mig_profile": s.mig_profile_name,
+                        "clock_mhz": s.clock_mhz,
+                        "vram_cap_gb": s.vram_cap_gb,
+                    }
+                    for s in sessions_by_gpu.get(g.index, [])
+                ],
+            }
+        )
+    return out
+
+
 def down_all() -> int:
     n = 0
     for s in state.all_sessions():
