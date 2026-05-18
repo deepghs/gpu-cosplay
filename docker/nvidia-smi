@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
-"""Wrapper around the real /usr/bin/nvidia-smi.
+"""Shim around the real nvidia-smi.
 
-Runs the real binary, then post-processes stdout/stderr to substitute the
-host GPU's name and physical MIG slice memory with the target GPU's name and
-advertised VRAM. Falls through unchanged when env vars aren't set.
+Located at /usr/local/bin/nvidia-smi (first on PATH); finds and invokes the
+real binary via shutil.which after dropping its own directory from PATH so we
+never touch /usr/bin/nvidia-smi itself.
 
-Env vars consumed (set by `gpu-cosplay up`):
-  GPU_COSPLAY_PRETTY            target GPU display name, e.g. "RTX 3090"
-  GPU_COSPLAY_VRAM_GB           target VRAM in GB (float), e.g. "24"
-  GPU_COSPLAY_PHYS_VRAM_MIB     physical slice memory in MiB, e.g. "17152"
+Pass-through behaviour: every nvidia-smi subcommand and flag is supported,
+because we just forward sys.argv and the env to the real binary and rewrite
+its output line by line as a stream. Streaming commands (`dmon`, `pmon`,
+`-l/--loop`, `-lms/--loop-ms`) work in real time — we do NOT buffer the
+whole output.
+
+Rewrites applied (only when target env vars are set):
+  1. Host GPU name (and any "  MIG <prof>" suffix) -> target GPU name,
+     padded to preserve column widths inside |-delimited tables so the
+     ASCII table stays aligned.
+  2. Physical MIG slice memory in MiB -> target VRAM in MiB.
+  3. nvidia-smi -L's "MIG <prof> Device N: ..." sub-line is dropped so the
+     listing looks like a single non-MIG device.
+  4. For --query-gpu --format=csv output, fields the host can't answer
+     correctly ([Insufficient Permissions], or the host's own TDP) are
+     overwritten with the target value (memory.total, power.max_limit, etc.).
+
+Env vars consumed:
+  GPU_COSPLAY_PRETTY            target GPU display name
+  GPU_COSPLAY_VRAM_GB           target VRAM in GB (float)
+  GPU_COSPLAY_PHYS_VRAM_MIB     physical slice memory in MiB
+  GPU_COSPLAY_TDP_W             target TDP in W
 """
 
 from __future__ import annotations
+
 import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
 
-import shutil
 
-
-# We never rename or replace the real binary. The shim lives at
-# /usr/local/bin/nvidia-smi (first on PATH); the real one stays wherever the
-# driver package installed it. We find it via shutil.which after dropping our
-# own directory from PATH.
+# ---------------------------------------------------------------------------
+# Locate the real binary
+# ---------------------------------------------------------------------------
 def _find_real() -> str:
     here = os.path.realpath(__file__)
     self_dir = os.path.realpath(os.path.dirname(here))
@@ -40,125 +58,213 @@ def _find_real() -> str:
 REAL = _find_real()
 
 
-def _rewrite(text: str, name: str, target_mib: int, phys_mib: int) -> str:
-    if not text:
-        return text
-    # 1. Device name substitutions. nvidia-smi prints things like:
-    #    "NVIDIA H200", "NVIDIA H200 MIG 1g.18gb",
-    #    "NVIDIA A100-SXM4-80GB", "NVIDIA A100-SXM4-80GB MIG 2g.20gb"
-    text = re.sub(
-        r"NVIDIA (?:H\d+|A100[-\w]*|A30|A40|A10|H100[-\w]*|GH\d+)(?:\s+MIG\s+\d+g\.\d+gb)?",
-        name,
-        text,
-    )
+# ---------------------------------------------------------------------------
+# Target spec from env
+# ---------------------------------------------------------------------------
+NAME = (os.environ.get("GPU_COSPLAY_PRETTY") or "").strip()
+_VRAM_GB_S = os.environ.get("GPU_COSPLAY_VRAM_GB") or ""
+_PHYS_MIB_S = os.environ.get("GPU_COSPLAY_PHYS_VRAM_MIB") or ""
+_TDP_W_S = os.environ.get("GPU_COSPLAY_TDP_W") or ""
 
-    # 2. Memory total substitution: replace any occurrence of the physical
-    #    MIG slice memory with the target VRAM. Restrict to tokenish
-    #    occurrences (not adjacent to other digits) to avoid stomping unrelated
-    #    numbers in the report.
-    if phys_mib > 0 and target_mib > 0:
-        text = re.sub(rf"(?<!\d){phys_mib}(?!\d)", str(target_mib), text)
-
-    # 3. nvidia-smi -L's MIG sub-line ("  MIG 1g.18gb  Device 0: (UUID: ...)")
-    #    — strip so the listing looks like a single non-MIG device.
-    text = re.sub(r"\n  MIG \d+g\.\d+gb\s+Device\s+\d+:[^\n]*", "", text)
-
-    # 4. "[Insufficient Permissions]" — inside a MIG slice, --query-gpu queries
-    #    for memory.total / power.* / etc return this string. Substitute the
-    #    target's value when we know what was asked. The query string is in
-    #    sys.argv, e.g. "--query-gpu=name,memory.total,power.max_limit".
-    text = _patch_query_gpu(text, name, target_mib)
-    return text
+try:
+    TARGET_MIB = int(round(float(_VRAM_GB_S) * 1024)) if _VRAM_GB_S else 0
+except ValueError:
+    TARGET_MIB = 0
+try:
+    PHYS_MIB = int(_PHYS_MIB_S) if _PHYS_MIB_S else 0
+except ValueError:
+    PHYS_MIB = 0
+try:
+    TDP_W = float(_TDP_W_S) if _TDP_W_S else 0.0
+except ValueError:
+    TDP_W = 0.0
 
 
-def _patch_query_gpu(text: str, name: str, target_mib: int) -> str:
-    """Rewrite values in --query-gpu --format=csv output to match the target.
+# ---------------------------------------------------------------------------
+# Regex patterns
+# ---------------------------------------------------------------------------
+# Match the host GPU name (and any " MIG <profile>" suffix), plus any trailing
+# whitespace. Eating trailing whitespace lets the substitution pad/consume
+# whitespace to preserve column widths.
+_GPU_NAME_CORE = (
+    r"NVIDIA "
+    r"(?:H\d+(?:[- ]\w+)*|A100[-\w]*|A30|A40|A10|A16|"
+    r"H100[-\w]*|GH\d+|L40[Ss]?|L4|V100[-\w]*|T4|"
+    r"GeForce [A-Z]+ \d{4}[\s\w]*|Tesla [A-Z]\d+|RTX [A-Z]?\d{4}[\s\w]*)"
+)
+NAME_RE_PAD = re.compile(_GPU_NAME_CORE + r"(?:\s+MIG\s+\d+g\.\d+gb)? *")
+NAME_RE_NOPAD = re.compile(_GPU_NAME_CORE + r"(?:\s+MIG\s+\d+g\.\d+gb)?")
 
-    Some fields nvidia-smi returns from inside a MIG slice are "[Insufficient
-    Permissions]" (memory.total). Other fields return the host's real value
-    (power.max_limit returns the host GPU's TDP, not the slice's). Either way,
-    if we know the right answer for the target, we substitute.
-    """
-    args = sys.argv[1:]
+# Physical MIG slice memory as a digit token (with optional trailing spaces).
+PHYS_RE_PAD = re.compile(rf"(?<!\d){PHYS_MIB} *") if PHYS_MIB > 0 else None
+PHYS_RE_NOPAD = re.compile(rf"(?<!\d){PHYS_MIB}(?!\d)") if PHYS_MIB > 0 else None
+
+# `nvidia-smi -L` MIG sub-line: "  MIG 1g.18gb     Device 0: (UUID: ...)"
+MIG_SUB_LINE_RE = re.compile(r"^\s*MIG \d+g\.\d+gb\s+Device\s+\d+:")
+
+
+def _pad_repl(target: str):
+    """Build a regex replacement callback that emits `target` followed by
+    enough spaces to fill the original match length (which includes the name
+    plus its trailing whitespace)."""
+
+    def repl(m: re.Match) -> str:
+        orig = m.group(0)
+        if len(target) >= len(orig):
+            return target  # overflow; column will widen by the excess
+        return target + " " * (len(orig) - len(target))
+
+    return repl
+
+
+def _name_repl_in_table(m: re.Match) -> str:
+    return _pad_repl(NAME)(m)
+
+
+def _phys_repl_in_table(m: re.Match) -> str:
+    return _pad_repl(str(TARGET_MIB))(m)
+
+
+# ---------------------------------------------------------------------------
+# Per-line rewrite
+# ---------------------------------------------------------------------------
+def _rewrite_line(line: str) -> str:
+    if not NAME:
+        return line
+
+    # 1. Drop MIG sub-line in `-L` output.
+    if MIG_SUB_LINE_RE.match(line):
+        return ""
+
+    if "|" in line:
+        # 2. Width-preserving substitution inside |-delimited columns.
+        return (
+            NAME_RE_PAD.sub(_name_repl_in_table, line)
+            if PHYS_RE_PAD is None
+            else PHYS_RE_PAD.sub(_phys_repl_in_table, NAME_RE_PAD.sub(_name_repl_in_table, line))
+        )
+    else:
+        # 3. Plain text: simple substitution (no column to preserve).
+        new = NAME_RE_NOPAD.sub(NAME, line)
+        if PHYS_RE_NOPAD is not None:
+            new = PHYS_RE_NOPAD.sub(str(TARGET_MIB), new)
+        return new
+
+
+# ---------------------------------------------------------------------------
+# --query-gpu --format=csv field rewriter
+# ---------------------------------------------------------------------------
+def _query_gpu_rewriter():
+    """Return a closure that rewrites lines of --query-gpu CSV output to fill
+    in target values for fields the real binary can't (or shouldn't) answer
+    correctly inside a MIG slice."""
     fields: list[str] = []
-    for a in args:
+    for a in sys.argv[1:]:
         if a.startswith("--query-gpu="):
             fields = [f.strip() for f in a[len("--query-gpu=") :].split(",")]
             break
     if not fields:
-        return text
+        return None
 
-    tdp_w = float(os.environ.get("GPU_COSPLAY_TDP_W", "0") or 0)
-    no_units = any("nounits" in a for a in args)
+    no_units = any("nounits" in a for a in sys.argv[1:])
+    no_header = any("noheader" in a for a in sys.argv[1:])
 
-    def fmt_mib(v_mib: int) -> str:
-        return f"{v_mib}" if no_units else f"{v_mib} MiB"
+    def fmt_mib(v):
+        return f"{v}" if no_units else f"{v} MiB"
 
-    def fmt_w(v_w: float) -> str:
-        return f"{v_w:.2f}" if no_units else f"{v_w:.2f} W"
+    def fmt_w(v):
+        return f"{v:.2f}" if no_units else f"{v:.2f} W"
 
-    replacements: dict[str, str] = {}
-    for f in fields:
+    replacements: dict[int, str] = {}
+    for i, f in enumerate(fields):
         f_norm = f.replace(" ", "").lower()
-        if f_norm == "memory.total" and target_mib > 0:
-            replacements[f] = fmt_mib(target_mib)
-        elif f_norm == "memory.free" and target_mib > 0:
-            replacements[f] = fmt_mib(target_mib)
+        if f_norm == "memory.total" and TARGET_MIB > 0:
+            replacements[i] = fmt_mib(TARGET_MIB)
+        elif f_norm == "memory.free" and TARGET_MIB > 0:
+            replacements[i] = fmt_mib(TARGET_MIB)
         elif f_norm == "memory.used":
-            replacements[f] = fmt_mib(0)
-        elif f_norm in {"power.max_limit", "power.default_limit"} and tdp_w:
-            replacements[f] = fmt_w(tdp_w)
-        elif f_norm == "name":
-            replacements[f] = name
+            replacements[i] = fmt_mib(0)
+        elif f_norm in {"power.max_limit", "power.default_limit"} and TDP_W > 0:
+            replacements[i] = fmt_w(TDP_W)
+        elif f_norm == "name" and NAME:
+            replacements[i] = NAME
 
     if not replacements:
-        return text
+        return None
 
-    out_lines = text.splitlines()
-    new_lines = []
-    header_seen = False
-    for line in out_lines:
-        # Header line (when not --format=csv,noheader): pass through.
-        if not header_seen and "," in line and not any(c.isdigit() for c in line.split(",")[0]):
-            new_lines.append(line)
-            header_seen = True
-            continue
+    header_seen = [False]
+
+    def rewrite(line: str) -> str:
+        # When --format=csv (default), the very first non-empty line is the
+        # header. Pass it through unchanged. When --format=csv,noheader is
+        # specified, there's no header line, so every line is data.
+        if not no_header and not header_seen[0] and line.strip():
+            header_seen[0] = True
+            return line
         cols = [c.strip() for c in line.split(",")]
         if len(cols) != len(fields):
-            new_lines.append(line)
-            continue
-        for i, f in enumerate(fields):
-            if f in replacements:
-                # Always overwrite — host's value (e.g. 700W TDP) is wrong for
-                # the target (e.g. 350W for RTX 3090), and so is "[Insufficient
-                # Permissions]" for MIG-restricted fields.
-                cols[i] = replacements[f]
-        new_lines.append(", ".join(cols))
-    return "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
+            return line
+        for i, v in replacements.items():
+            cols[i] = v
+        ends = "\n" if line.endswith("\n") else ""
+        return ", ".join(cols) + ends
+
+    return rewrite
+
+
+_query_gpu_rewrite = _query_gpu_rewriter()
+
+
+def _apply_all(line: str) -> str:
+    out = _rewrite_line(line)
+    # When --query-gpu was used, always pass through the CSV rewriter — it
+    # owns the policy on which fields to overwrite (including 1-column output
+    # that has no commas).
+    if _query_gpu_rewrite is not None and out:
+        out = _query_gpu_rewrite(out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Main: stream output line-by-line
+# ---------------------------------------------------------------------------
+def _pump(src, dst, transform):
+    for raw in iter(src.readline, ""):
+        try:
+            new = transform(raw)
+        except Exception:
+            new = raw
+        if new:
+            dst.write(new)
+            dst.flush()
+    src.close()
 
 
 def main() -> int:
-    p = subprocess.run([REAL] + sys.argv[1:], capture_output=True, text=True)
-
-    name = (os.environ.get("GPU_COSPLAY_PRETTY") or "").strip()
-    vram_gb = os.environ.get("GPU_COSPLAY_VRAM_GB") or ""
-    phys_mib_str = os.environ.get("GPU_COSPLAY_PHYS_VRAM_MIB") or ""
-
-    target_mib = 0
-    phys_mib = 0
-    if vram_gb and phys_mib_str:
-        try:
-            target_mib = int(round(float(vram_gb) * 1024))
-            phys_mib = int(phys_mib_str)
-        except (ValueError, TypeError):
-            pass
-
-    out = _rewrite(p.stdout, name, target_mib, phys_mib) if name else p.stdout
-    err = _rewrite(p.stderr, name, target_mib, phys_mib) if name else p.stderr
-
-    sys.stdout.write(out)
-    sys.stderr.write(err)
-    return p.returncode
+    # Use Popen so we can stream output. Inherit stdin from parent (some
+    # subcommands may want it, even though most nvidia-smi commands don't).
+    p = subprocess.Popen(
+        [REAL] + sys.argv[1:],
+        stdin=sys.stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    t_out = threading.Thread(target=_pump, args=(p.stdout, sys.stdout, _apply_all))
+    t_err = threading.Thread(target=_pump, args=(p.stderr, sys.stderr, _apply_all))
+    t_out.daemon = True
+    t_err.daemon = True
+    t_out.start()
+    t_err.start()
+    try:
+        rc = p.wait()
+    except KeyboardInterrupt:
+        p.terminate()
+        rc = p.wait()
+    t_out.join(timeout=1)
+    t_err.join(timeout=1)
+    return rc
 
 
 if __name__ == "__main__":
