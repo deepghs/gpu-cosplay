@@ -1,0 +1,522 @@
+# GPU spec database for gpu-cosplay.
+#
+# Fields per card:
+#   key              snake-case canonical id
+#   pretty           display name
+#   aliases          list of accepted aliases (case-insensitive, '-' and '_' are equivalent)
+#   arch             turing | ampere | ada | hopper | blackwell | volta
+#   sm_count         total SMs on the die
+#   vram_gb          advertised VRAM size
+#   fp32_tflops      dense FP32 from CUDA cores (boost clock)
+#   bf16_tc_tflops   dense BF16/FP16 Tensor Core w/ FP32 accumulate; null if no usable TC
+#   bandwidth_gbs    peak memory bandwidth
+#   tdp_w            board power
+#   notes            short text shown in `info`
+#
+# Sources: NVIDIA Turing / Ampere GA102 / Ada Lovelace / Hopper whitepapers,
+# product pages, and Epoch AI ml_hardware.csv. Dense (no 2:1 sparsity) figures.
+
+cards:
+  # ------------------------------ Turing (no Tensor Core: GTX 16xx) ------------------------------
+  - key: gtx_1650
+    pretty: "GTX 1650"
+    aliases: ["1650", "gtx1650"]
+    arch: turing
+    sm_count: 14
+    vram_gb: 4
+    fp32_tflops: 3.0
+    bf16_tc_tflops: null
+    bandwidth_gbs: 128
+    tdp_w: 75
+    notes: "Turing TU117. No usable Tensor Core for ML."
+
+  - key: gtx_1660
+    pretty: "GTX 1660"
+    aliases: ["1660", "gtx1660"]
+    arch: turing
+    sm_count: 22
+    vram_gb: 6
+    fp32_tflops: 5.0
+    bf16_tc_tflops: null
+    bandwidth_gbs: 192
+    tdp_w: 120
+
+  - key: gtx_1660_ti
+    pretty: "GTX 1660 Ti"
+    aliases: ["1660ti", "1660_ti", "gtx1660ti"]
+    arch: turing
+    sm_count: 24
+    vram_gb: 6
+    fp32_tflops: 5.4
+    bf16_tc_tflops: null
+    bandwidth_gbs: 288
+    tdp_w: 120
+
+  - key: gtx_1660_super
+    pretty: "GTX 1660 Super"
+    aliases: ["1660super", "1660_super", "gtx1660super"]
+    arch: turing
+    sm_count: 22
+    vram_gb: 6
+    fp32_tflops: 5.0
+    bf16_tc_tflops: null
+    bandwidth_gbs: 336
+    tdp_w: 125
+
+  # ------------------------------ Turing RTX 20-series ------------------------------
+  - key: rtx_2060
+    pretty: "RTX 2060 (6GB)"
+    aliases: ["2060", "rtx2060", "2060_6g"]
+    arch: turing
+    sm_count: 30
+    vram_gb: 6
+    fp32_tflops: 6.5
+    bf16_tc_tflops: 52.0
+    bandwidth_gbs: 336
+    tdp_w: 160
+
+  - key: rtx_2060_12g
+    pretty: "RTX 2060 (12GB)"
+    aliases: ["2060_12g", "rtx2060_12g"]
+    arch: turing
+    sm_count: 34
+    vram_gb: 12
+    fp32_tflops: 7.2
+    bf16_tc_tflops: 58.0
+    bandwidth_gbs: 336
+    tdp_w: 184
+
+  - key: rtx_2070
+    pretty: "RTX 2070"
+    aliases: ["2070", "rtx2070"]
+    arch: turing
+    sm_count: 36
+    vram_gb: 8
+    fp32_tflops: 7.5
+    bf16_tc_tflops: 60.0
+    bandwidth_gbs: 448
+    tdp_w: 175
+
+  - key: rtx_2070_super
+    pretty: "RTX 2070 Super"
+    aliases: ["2070super", "rtx2070super"]
+    arch: turing
+    sm_count: 40
+    vram_gb: 8
+    fp32_tflops: 9.1
+    bf16_tc_tflops: 73.0
+    bandwidth_gbs: 448
+    tdp_w: 215
+
+  - key: rtx_2080
+    pretty: "RTX 2080"
+    aliases: ["2080", "rtx2080"]
+    arch: turing
+    sm_count: 46
+    vram_gb: 8
+    fp32_tflops: 10.1
+    bf16_tc_tflops: 81.0
+    bandwidth_gbs: 448
+    tdp_w: 215
+
+  - key: rtx_2080_super
+    pretty: "RTX 2080 Super"
+    aliases: ["2080super", "rtx2080super"]
+    arch: turing
+    sm_count: 48
+    vram_gb: 8
+    fp32_tflops: 11.2
+    bf16_tc_tflops: 89.0
+    bandwidth_gbs: 496
+    tdp_w: 250
+
+  - key: rtx_2080_ti
+    pretty: "RTX 2080 Ti"
+    aliases: ["2080ti", "rtx2080ti"]
+    arch: turing
+    sm_count: 68
+    vram_gb: 11
+    fp32_tflops: 13.4
+    bf16_tc_tflops: 108.0
+    bandwidth_gbs: 616
+    tdp_w: 250
+
+  # ------------------------------ Ampere RTX 30-series ------------------------------
+  - key: rtx_3060
+    pretty: "RTX 3060 (12GB)"
+    aliases: ["3060", "rtx3060"]
+    arch: ampere
+    sm_count: 28
+    vram_gb: 12
+    fp32_tflops: 12.7
+    bf16_tc_tflops: 51.0
+    bandwidth_gbs: 360
+    tdp_w: 170
+
+  - key: rtx_3060_ti
+    pretty: "RTX 3060 Ti"
+    aliases: ["3060ti", "rtx3060ti"]
+    arch: ampere
+    sm_count: 38
+    vram_gb: 8
+    fp32_tflops: 16.2
+    bf16_tc_tflops: 65.0
+    bandwidth_gbs: 448
+    tdp_w: 200
+
+  - key: rtx_3070
+    pretty: "RTX 3070"
+    aliases: ["3070", "rtx3070"]
+    arch: ampere
+    sm_count: 46
+    vram_gb: 8
+    fp32_tflops: 20.3
+    bf16_tc_tflops: 81.0
+    bandwidth_gbs: 448
+    tdp_w: 220
+
+  - key: rtx_3070_ti
+    pretty: "RTX 3070 Ti"
+    aliases: ["3070ti", "rtx3070ti"]
+    arch: ampere
+    sm_count: 48
+    vram_gb: 8
+    fp32_tflops: 21.7
+    bf16_tc_tflops: 87.0
+    bandwidth_gbs: 608
+    tdp_w: 290
+
+  - key: rtx_3080
+    pretty: "RTX 3080 (10GB)"
+    aliases: ["3080", "rtx3080", "3080_10g"]
+    arch: ampere
+    sm_count: 68
+    vram_gb: 10
+    fp32_tflops: 29.8
+    bf16_tc_tflops: 119.0
+    bandwidth_gbs: 760
+    tdp_w: 320
+
+  - key: rtx_3080_12g
+    pretty: "RTX 3080 (12GB)"
+    aliases: ["3080_12g", "rtx3080_12g"]
+    arch: ampere
+    sm_count: 70
+    vram_gb: 12
+    fp32_tflops: 30.6
+    bf16_tc_tflops: 122.0
+    bandwidth_gbs: 912
+    tdp_w: 350
+
+  - key: rtx_3080_ti
+    pretty: "RTX 3080 Ti"
+    aliases: ["3080ti", "rtx3080ti"]
+    arch: ampere
+    sm_count: 80
+    vram_gb: 12
+    fp32_tflops: 34.1
+    bf16_tc_tflops: 136.0
+    bandwidth_gbs: 912
+    tdp_w: 350
+
+  - key: rtx_3090
+    pretty: "RTX 3090"
+    aliases: ["3090", "rtx3090"]
+    arch: ampere
+    sm_count: 82
+    vram_gb: 24
+    fp32_tflops: 35.6
+    bf16_tc_tflops: 142.0
+    bandwidth_gbs: 936
+    tdp_w: 350
+
+  - key: rtx_3090_ti
+    pretty: "RTX 3090 Ti"
+    aliases: ["3090ti", "rtx3090ti"]
+    arch: ampere
+    sm_count: 84
+    vram_gb: 24
+    fp32_tflops: 40.0
+    bf16_tc_tflops: 160.0
+    bandwidth_gbs: 1008
+    tdp_w: 450
+
+  # ------------------------------ Ada Lovelace RTX 40-series ------------------------------
+  - key: rtx_4060
+    pretty: "RTX 4060"
+    aliases: ["4060", "rtx4060"]
+    arch: ada
+    sm_count: 24
+    vram_gb: 8
+    fp32_tflops: 15.1
+    bf16_tc_tflops: 121.0
+    bandwidth_gbs: 272
+    tdp_w: 115
+
+  - key: rtx_4060_ti
+    pretty: "RTX 4060 Ti (8GB)"
+    aliases: ["4060ti", "rtx4060ti", "4060ti_8g"]
+    arch: ada
+    sm_count: 34
+    vram_gb: 8
+    fp32_tflops: 22.1
+    bf16_tc_tflops: 177.0
+    bandwidth_gbs: 288
+    tdp_w: 160
+
+  - key: rtx_4060_ti_16g
+    pretty: "RTX 4060 Ti (16GB)"
+    aliases: ["4060ti_16g", "rtx4060ti_16g"]
+    arch: ada
+    sm_count: 34
+    vram_gb: 16
+    fp32_tflops: 22.1
+    bf16_tc_tflops: 177.0
+    bandwidth_gbs: 288
+    tdp_w: 165
+
+  - key: rtx_4070
+    pretty: "RTX 4070"
+    aliases: ["4070", "rtx4070"]
+    arch: ada
+    sm_count: 46
+    vram_gb: 12
+    fp32_tflops: 29.1
+    bf16_tc_tflops: 233.0
+    bandwidth_gbs: 504
+    tdp_w: 200
+
+  - key: rtx_4070_super
+    pretty: "RTX 4070 Super"
+    aliases: ["4070super", "rtx4070super"]
+    arch: ada
+    sm_count: 56
+    vram_gb: 12
+    fp32_tflops: 35.5
+    bf16_tc_tflops: 284.0
+    bandwidth_gbs: 504
+    tdp_w: 220
+
+  - key: rtx_4070_ti
+    pretty: "RTX 4070 Ti"
+    aliases: ["4070ti", "rtx4070ti"]
+    arch: ada
+    sm_count: 60
+    vram_gb: 12
+    fp32_tflops: 40.1
+    bf16_tc_tflops: 321.0
+    bandwidth_gbs: 504
+    tdp_w: 285
+
+  - key: rtx_4070_ti_super
+    pretty: "RTX 4070 Ti Super"
+    aliases: ["4070tisuper", "rtx4070tisuper"]
+    arch: ada
+    sm_count: 66
+    vram_gb: 16
+    fp32_tflops: 44.1
+    bf16_tc_tflops: 353.0
+    bandwidth_gbs: 672
+    tdp_w: 285
+
+  - key: rtx_4080
+    pretty: "RTX 4080"
+    aliases: ["4080", "rtx4080"]
+    arch: ada
+    sm_count: 76
+    vram_gb: 16
+    fp32_tflops: 48.7
+    bf16_tc_tflops: 390.0
+    bandwidth_gbs: 717
+    tdp_w: 320
+
+  - key: rtx_4080_super
+    pretty: "RTX 4080 Super"
+    aliases: ["4080super", "rtx4080super"]
+    arch: ada
+    sm_count: 80
+    vram_gb: 16
+    fp32_tflops: 52.2
+    bf16_tc_tflops: 418.0
+    bandwidth_gbs: 736
+    tdp_w: 320
+
+  - key: rtx_4090
+    pretty: "RTX 4090"
+    aliases: ["4090", "rtx4090"]
+    arch: ada
+    sm_count: 128
+    vram_gb: 24
+    fp32_tflops: 82.6
+    bf16_tc_tflops: 330.0
+    bandwidth_gbs: 1008
+    tdp_w: 450
+
+  # ------------------------------ Ada / Hopper workstation / datacenter ------------------------------
+  - key: l4
+    pretty: "L4"
+    aliases: ["l4"]
+    arch: ada
+    sm_count: 58
+    vram_gb: 24
+    fp32_tflops: 30.3
+    bf16_tc_tflops: 242.0
+    bandwidth_gbs: 300
+    tdp_w: 72
+
+  - key: l40
+    pretty: "L40"
+    aliases: ["l40"]
+    arch: ada
+    sm_count: 142
+    vram_gb: 48
+    fp32_tflops: 90.5
+    bf16_tc_tflops: 362.0
+    bandwidth_gbs: 864
+    tdp_w: 300
+
+  - key: l40s
+    pretty: "L40S"
+    aliases: ["l40s"]
+    arch: ada
+    sm_count: 142
+    vram_gb: 48
+    fp32_tflops: 91.6
+    bf16_tc_tflops: 366.0
+    bandwidth_gbs: 864
+    tdp_w: 350
+
+  - key: a40
+    pretty: "A40"
+    aliases: ["a40"]
+    arch: ampere
+    sm_count: 84
+    vram_gb: 48
+    fp32_tflops: 37.4
+    bf16_tc_tflops: 150.0
+    bandwidth_gbs: 696
+    tdp_w: 300
+
+  - key: a10
+    pretty: "A10"
+    aliases: ["a10"]
+    arch: ampere
+    sm_count: 72
+    vram_gb: 24
+    fp32_tflops: 31.2
+    bf16_tc_tflops: 125.0
+    bandwidth_gbs: 600
+    tdp_w: 150
+
+  - key: a30
+    pretty: "A30"
+    aliases: ["a30"]
+    arch: ampere
+    sm_count: 56
+    vram_gb: 24
+    fp32_tflops: 10.3
+    bf16_tc_tflops: 165.0
+    bandwidth_gbs: 933
+    tdp_w: 165
+
+  - key: a100_40g
+    pretty: "A100 (40GB)"
+    aliases: ["a100", "a100_40g"]
+    arch: ampere
+    sm_count: 108
+    vram_gb: 40
+    fp32_tflops: 19.5
+    bf16_tc_tflops: 312.0
+    bandwidth_gbs: 1555
+    tdp_w: 400
+
+  - key: a100_80g
+    pretty: "A100 (80GB)"
+    aliases: ["a100_80g", "a100_80gb"]
+    arch: ampere
+    sm_count: 108
+    vram_gb: 80
+    fp32_tflops: 19.5
+    bf16_tc_tflops: 312.0
+    bandwidth_gbs: 2039
+    tdp_w: 400
+
+  - key: h100_pcie_80g
+    pretty: "H100 PCIe (80GB)"
+    aliases: ["h100_pcie", "h100p", "h100_pcie_80g"]
+    arch: hopper
+    sm_count: 114
+    vram_gb: 80
+    fp32_tflops: 51.2
+    bf16_tc_tflops: 756.0
+    bandwidth_gbs: 2039
+    tdp_w: 350
+
+  - key: h100_sxm_80g
+    pretty: "H100 SXM (80GB)"
+    aliases: ["h100", "h100_sxm", "h100_80g"]
+    arch: hopper
+    sm_count: 132
+    vram_gb: 80
+    fp32_tflops: 67.0
+    bf16_tc_tflops: 989.0
+    bandwidth_gbs: 3350
+    tdp_w: 700
+
+  - key: h100_nvl
+    pretty: "H100 NVL (94GB)"
+    aliases: ["h100nvl", "h100_nvl"]
+    arch: hopper
+    sm_count: 132
+    vram_gb: 94
+    fp32_tflops: 67.0
+    bf16_tc_tflops: 989.0
+    bandwidth_gbs: 3938
+    tdp_w: 400
+
+  - key: h200_sxm_141g
+    pretty: "H200 SXM (141GB)"
+    aliases: ["h200", "h200_sxm", "h200_141g"]
+    arch: hopper
+    sm_count: 132
+    vram_gb: 141
+    fp32_tflops: 67.0
+    bf16_tc_tflops: 989.0
+    bandwidth_gbs: 4800
+    tdp_w: 700
+
+  # ------------------------------ Older datacenter (no Tensor Core BF16) ------------------------------
+  - key: v100_16g
+    pretty: "V100 (16GB)"
+    aliases: ["v100", "v100_16g"]
+    arch: volta
+    sm_count: 80
+    vram_gb: 16
+    fp32_tflops: 15.7
+    bf16_tc_tflops: null
+    bandwidth_gbs: 900
+    tdp_w: 300
+    notes: "Volta; has FP16 Tensor Core (125 TFLOPS) but no BF16."
+
+  - key: v100_32g
+    pretty: "V100 (32GB)"
+    aliases: ["v100_32g"]
+    arch: volta
+    sm_count: 80
+    vram_gb: 32
+    fp32_tflops: 15.7
+    bf16_tc_tflops: null
+    bandwidth_gbs: 900
+    tdp_w: 300
+
+  - key: t4
+    pretty: "T4"
+    aliases: ["t4"]
+    arch: turing
+    sm_count: 40
+    vram_gb: 16
+    fp32_tflops: 8.1
+    bf16_tc_tflops: null
+    bandwidth_gbs: 320
+    tdp_w: 70
+    notes: "Turing T4; FP16 Tensor Core only, no BF16."

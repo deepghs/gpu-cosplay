@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests / ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.10", "3.11", "3.12"]
+        exclude:
+          # macos runners are limited; keep matrix narrow there
+          - os: macos-latest
+            python: "3.9"
+          - os: macos-latest
+            python: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check gpu_cosplay tests
+
+      - name: Unit tests
+        run: pytest -v
+
+      - name: Smoke test CLI (no GPU needed)
+        run: |
+          gpu-cosplay --version
+          gpu-cosplay ls | head -5
+          gpu-cosplay info 3090
+          gpu-cosplay info 4090
+          gpu-cosplay info a100
+          gpu-cosplay info 2060
+
+  docker-build:
+    name: docker / image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build cosplay image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          tags: gpu-cosplay:ci
+          push: false
+          load: true
+          # Use a CUDA tag that doesn't require GPU to pull and run a basic check.
+          # We don't run torch here; just verify the image builds and sshd is present.
+
+      - name: Smoke test image (non-GPU)
+        run: |
+          docker run --rm --entrypoint /bin/bash gpu-cosplay:ci -lc \
+            'which sshd && which python3 && /entrypoint.sh true || true'

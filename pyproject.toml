@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpu-cosplay"
+version = "0.1.0"
+description = "Make your H100/H200/A100 cosplay as an RTX 3090/4090/2060 — VRAM, FP32, BF16 Tensor Core and bandwidth, all matched."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [{ name = "DeepGHS" }]
+keywords = ["gpu", "cuda", "mig", "nvidia", "benchmark", "simulation"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+gpu-cosplay = "gpu_cosplay.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/deepghs/gpu-cosplay"
+Issues = "https://github.com/deepghs/gpu-cosplay/issues"
+
+[tool.setuptools]
+packages = ["gpu_cosplay"]
+
+[tool.setuptools.package-data]
+gpu_cosplay = ["data/*.yaml"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501"]
