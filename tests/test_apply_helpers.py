@@ -6,9 +6,12 @@ from unittest import mock
 import gpu_cosplay.apply as apply_mod
 
 
-def test_default_base_image_format():
-    assert apply_mod.DEFAULT_BASE_IMAGE.startswith("nvidia/cuda:")
-    assert apply_mod.DEFAULT_BASE_IMAGE.endswith(apply_mod.DEFAULT_CUDA_TAG)
+def test_default_base_image_is_pytorch():
+    # Default ships torch preinstalled so containers are ready to `import torch`
+    # without a separate install step.
+    assert apply_mod.DEFAULT_BASE_IMAGE.startswith("pytorch/pytorch:")
+    assert "cuda" in apply_mod.DEFAULT_BASE_IMAGE
+    assert "cudnn" in apply_mod.DEFAULT_BASE_IMAGE
 
 
 def test_build_image_passes_base_arg():

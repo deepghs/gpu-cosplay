@@ -72,7 +72,7 @@ gpu-cosplay down --all
 git clone https://github.com/deepghs/gpu-cosplay
 cd gpu-cosplay
 pip install -e .
-gpu-cosplay build       # build the docker image (one-time, ~5 GB on disk)
+gpu-cosplay build       # build the docker image (one-time, ~8.6 GB on disk)
 ```
 
 The `build` step is optional — the first `gpu-cosplay up` will auto-build the
@@ -95,36 +95,40 @@ Run `gpu-cosplay doctor` to verify each requirement.
 ## The cosplay container
 
 When you run `gpu-cosplay up <GPU>`, your code runs inside a Docker image built
-from [`docker/Dockerfile`](docker/Dockerfile). It is **not** a pre-baked DL
-environment — it is a thin, configurable shell around the official NVIDIA CUDA
-image. You decide what ML stack goes inside.
+from [`docker/Dockerfile`](docker/Dockerfile). The default image ships
+**torch + cuDNN + Python preinstalled** so you can `import torch` immediately
+inside the container — no `pip install torch` step.
 
-**Base image.** `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (Ubuntu 24.04,
-CUDA 12.6.3 + cuDNN + headers, ~5 GB compressed). Chosen because:
-- It runs against NVIDIA driver ≥ R520 (covers any host that supports H100/H200
-  MIG, plus all current A100/A30/L40 systems).
-- `cudnn-devel` ships headers + libraries so `pip install torch` finds cuDNN
-  symbols and JIT-compiled kernels link cleanly.
+**Base image.** `pytorch/pytorch:2.12.0-cuda12.6-cudnn9-devel`
+(~8.6 GB compressed). Chosen because:
+- torch 2.12, CUDA 12.6, cuDNN 9 are ready to use.
+- Works against NVIDIA driver ≥ R535 (covers H100/H200 MIG and current
+  A100/A30/L40 systems).
+- Built on Ubuntu so `apt-get` works for our `openssh-server` etc. layer.
 
-Override with `--cuda-tag` if you need something else:
+Override with `--base` (any image) or `--cuda-tag` (shortcut for
+`nvidia/cuda:<TAG>` if you want a slim CUDA-only base instead):
 
 ```bash
-# Older driver: use CUDA 12.4 + Ubuntu 22.04
-gpu-cosplay build --cuda-tag 12.4.1-cudnn-devel-ubuntu22.04
+# Use your own pre-built training image as the base.
+gpu-cosplay build --base my-org/pytorch:v3 --tag my-cosplay-pt
 
-# Lean image without cuDNN (~3 GB smaller)
+# Slimmer CUDA-only base, no torch (you install your own ML stack).
+gpu-cosplay build --cuda-tag 12.6.3-cudnn-devel-ubuntu24.04
+
+# Lean image without cuDNN (~3 GB smaller still).
 gpu-cosplay build --cuda-tag 12.6.3-base-ubuntu24.04
-
-# CUDA 11.8 (for older PyTorch wheels)
-gpu-cosplay build --cuda-tag 11.8.0-cudnn8-devel-ubuntu22.04
 ```
 
-Any tag from [hub.docker.com/r/nvidia/cuda](https://hub.docker.com/r/nvidia/cuda/tags) works.
+Any tag from [hub.docker.com/r/pytorch/pytorch](https://hub.docker.com/r/pytorch/pytorch/tags)
+or [hub.docker.com/r/nvidia/cuda](https://hub.docker.com/r/nvidia/cuda/tags)
+works.
 
-**What's pre-installed.** Apart from CUDA/cuDNN from the base, just utilities:
-`openssh-server`, `sudo`, `tini`, `python3` + `pip` + `venv`, `build-essential`,
-`pkg-config`, `git`, `curl`/`wget`, `vim`, `tmux`, `htop`, `less`. No PyTorch,
-no transformers, no diffusers — install what you need via `pip` inside.
+**What's added on top of the pytorch base.** Just utilities — the ML stack is
+already there from `pytorch/pytorch`:
+`openssh-server`, `sudo`, `tini`, `build-essential`, `pkg-config`, `git`,
+`curl`/`wget`, `vim`, `tmux`, `htop`, `less`. Install extras like
+`transformers`, `diffusers`, etc. via `pip` inside the container.
 
 **What runs at start.** The entrypoint (`docker/entrypoint.sh`) is the
 interesting part — for each container:

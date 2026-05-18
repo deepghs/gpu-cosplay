@@ -73,7 +73,10 @@ def _image_exists(tag: str) -> bool:
 
 
 DEFAULT_CUDA_TAG = "12.6.3-cudnn-devel-ubuntu24.04"
-DEFAULT_BASE_IMAGE = f"nvidia/cuda:{DEFAULT_CUDA_TAG}"
+# Default base ships torch + cuDNN preinstalled so the container is ready to
+# run without `pip install torch`. Override via `--base IMAGE` to layer on top
+# of your own image, or `--cuda-tag <tag>` for a nvidia/cuda variant.
+DEFAULT_BASE_IMAGE = "pytorch/pytorch:2.12.0-cuda12.6-cudnn9-devel"
 
 
 def _dockerfile_dir() -> str:

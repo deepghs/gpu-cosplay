@@ -2,8 +2,10 @@
 #
 # Two ways to use this Dockerfile:
 #
-#   1. Default: nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04 + sshd + sudo + tini
-#      + the gpu-cosplay runtime hooks. ~5 GB image. Built by `gpu-cosplay build`.
+#   1. Default: pytorch/pytorch:2.12.0-cuda12.6-cudnn9-devel + sshd + sudo +
+#      tini + the gpu-cosplay runtime hooks. ~8.6 GB image. torch / cuDNN /
+#      Python are already in the base — no `pip install torch` needed
+#      inside the container. Built by `gpu-cosplay build` with no args.
 #
 #   2. Layered on your own image:
 #          gpu-cosplay build --base my-org/pytorch:v3 --tag my-cosplay-pt
@@ -11,7 +13,7 @@
 #      helpers. Then: `gpu-cosplay up 3090 --image my-cosplay-pt`.
 #
 # BASE_IMAGE must be Ubuntu/Debian-derived (we use apt-get).
-ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+ARG BASE_IMAGE=pytorch/pytorch:2.12.0-cuda12.6-cudnn9-devel
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
